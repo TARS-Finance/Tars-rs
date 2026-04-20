@@ -241,3 +241,274 @@ pub const fn size(length: usize) -> usize {
         _ => 9,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::get_dummy_utxo;
+    use crate::UtxoStatus;
+    use bitcoin::hashes::Hash;
+    use bitcoin::{Network, Txid, XOnlyPublicKey};
+    use eyre::Result;
+
+    const TEST_FEE: u64 = 1000;
+
+    #[test]
+    fn test_sort_utxos() {
+        let mut unsorted_utxos = vec![get_dummy_utxo(), get_dummy_utxo(), get_dummy_utxo()];
+        unsorted_utxos[0].txid = Txid::all_zeros();
+        unsorted_utxos[1].txid = Txid::from_slice(&[1u8; 32]).unwrap();
+        unsorted_utxos[2].txid = Txid::from_slice(&[2u8; 32]).unwrap();
+        let sorted_utxos = sort_utxos(&unsorted_utxos);
+
+        // Verify sorting by txid and then vout
+        for i in 1..sorted_utxos.len() {
+            let curr = &sorted_utxos[i];
+            let prev = &sorted_utxos[i - 1];
+            assert!(
+                curr.txid > prev.txid || (curr.txid == prev.txid && curr.vout > prev.vout),
+                "UTXOs not properly sorted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_create_inputs_from_utxos() {
+        let utxos = vec![get_dummy_utxo(), get_dummy_utxo(), get_dummy_utxo()];
+        let inputs = create_inputs_from_utxos(&utxos, &Witness::new(), Sequence::MAX);
+
+        assert_eq!(
+            inputs.len(),
+            utxos.len(),
+            "Input count should match UTXO count"
+        );
+
+        for (input, utxo) in inputs.iter().zip(utxos.iter()) {
+            assert_eq!(input.previous_output.txid, utxo.txid);
+            assert_eq!(input.previous_output.vout, utxo.vout);
+            assert!(input.script_sig.is_empty(), "ScriptSig should be empty");
+            assert_eq!(input.sequence, Sequence::MAX);
+            assert!(input.witness.is_empty(), "Witness should be empty");
+        }
+    }
+
+    #[test]
+    fn test_create_outputs() -> Result<()> {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let dummy_pubkey = XOnlyPublicKey::from_slice(&[2u8; 32]).unwrap();
+        let address = Address::p2tr(&secp, dummy_pubkey, None, Network::Testnet);
+
+        // Test case 1: Multiple output values with fee deducted from largest
+        let output_values = vec![100_000, 50_000, 25_000];
+        let outputs = create_outputs(output_values, &address, Some(1000))?;
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[0].value.to_sat(), 99_000); // 100k - 1k fee
+        assert_eq!(outputs[1].value.to_sat(), 50_000); // No fee deducted
+        assert_eq!(outputs[2].value.to_sat(), 25_000); // No fee deducted
+
+        // Verify all outputs go to the same recipient
+        for output in &outputs {
+            assert_eq!(output.script_pubkey, address.script_pubkey());
+        }
+
+        // Test case 2: Single output value with fee
+        let single_output = vec![200_000];
+        let outputs = create_outputs(single_output, &address, Some(500))?;
+
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].value.to_sat(), 199_500); // 200k - 500 fee
+        assert_eq!(outputs[0].script_pubkey, address.script_pubkey());
+
+        // Test case 3: No fee
+        let output_values = vec![100_000, 50_000];
+        let outputs = create_outputs(output_values, &address, None)?;
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].value.to_sat(), 100_000); // No fee deducted
+        assert_eq!(outputs[1].value.to_sat(), 50_000); // No fee deducted
+
+        // Test case 4: Fee exceeds largest value
+        let output_values = vec![100_000, 50_000];
+        let result = create_outputs(output_values, &address, Some(150_000));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Fee"));
+
+        // Test case 5: Empty output values
+        let result = create_outputs(vec![], &address, Some(1000));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Output values are empty"));
+
+        // Test case 6: Dust limit validation
+        let output_values = vec![600]; // Would become dust after fee
+        let result = create_outputs(output_values, &address, Some(100));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("dust limit"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_output_values() -> Result<()> {
+        let utxos = vec![get_dummy_utxo(), get_dummy_utxo(), get_dummy_utxo()];
+
+        // Test SIGHASH_SINGLE + ANYONECANPAY: should return one output value per UTXO
+        let output_values = get_output_values(&utxos, TapSighashType::SinglePlusAnyoneCanPay)?;
+        assert_eq!(output_values.len(), utxos.len());
+
+        // Verify the values match the UTXO values
+        for (output_value, utxo) in output_values.iter().zip(utxos.iter()) {
+            assert_eq!(*output_value, utxo.value);
+        }
+
+        // Test SIGHASH_ALL: should return single output value with total of all UTXOs
+        let output_values = get_output_values(&utxos, TapSighashType::All)?;
+        assert_eq!(output_values.len(), 1);
+
+        let total_utxo_value: u64 = utxos.iter().map(|u| u.value).sum();
+        assert_eq!(output_values[0], total_utxo_value);
+
+        // Test unsupported sighash type: should return error
+        let result = get_output_values(&utxos, TapSighashType::None);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported sighash type"));
+
+        // Test with empty UTXOs
+        let empty_utxos: Vec<Utxo> = vec![];
+        let output_values =
+            get_output_values(&empty_utxos, TapSighashType::SinglePlusAnyoneCanPay)?;
+        assert_eq!(output_values.len(), 0);
+
+        let output_values = get_output_values(&empty_utxos, TapSighashType::All)?;
+        assert_eq!(output_values.len(), 1);
+        assert_eq!(output_values[0], 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_transaction_from_utxos() -> Result<()> {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let dummy_pubkey = XOnlyPublicKey::from_slice(&[2u8; 32]).unwrap();
+        let recipient = Address::p2tr(&secp, dummy_pubkey, None, Network::Testnet);
+
+        // Test case 1: Normal transaction with fee
+        let utxos = vec![get_dummy_utxo(), get_dummy_utxo(), get_dummy_utxo()];
+        let tx = build_tx(
+            &utxos,
+            &recipient,
+            &Witness::new(),
+            Sequence::MAX,
+            TapSighashType::All,
+            Some(TEST_FEE),
+        )?;
+
+        assert_eq!(tx.input.len(), utxos.len());
+        assert_eq!(tx.output.len(), 1); // SIGHASH_ALL creates only one output
+
+        // Verify fee is deducted from the total
+        let total_output = tx.output[0].value.to_sat();
+        let total_input: u64 = utxos.iter().map(|u| u.value).sum();
+        assert_eq!(total_input - total_output, TEST_FEE);
+
+        // Test case 2: Transaction with no fee
+        let tx_no_fee = build_tx(
+            &utxos,
+            &recipient,
+            &Witness::new(),
+            Sequence::MAX,
+            TapSighashType::All,
+            None,
+        )?;
+        let total_output_no_fee: u64 = tx_no_fee.output.iter().map(|o| o.value.to_sat()).sum();
+        assert_eq!(total_input, total_output_no_fee);
+
+        // Test case 3: Empty UTXOs
+        let empty_utxos: Vec<Utxo> = vec![];
+        let result = build_tx(
+            &empty_utxos,
+            &recipient,
+            &Witness::new(),
+            Sequence::MAX,
+            TapSighashType::All,
+            None,
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No UTXOs provided"));
+
+        // Test case 4: Fee exceeds value
+        let small_utxos = vec![Utxo {
+            txid: Txid::hash(&[1u8; 32]),
+            vout: 0,
+            value: 1000,
+            status: UtxoStatus {
+                confirmed: true,
+                block_height: Some(100),
+            },
+        }];
+        let result = build_tx(
+            &small_utxos,
+            &recipient,
+            &Witness::new(),
+            Sequence::MAX,
+            TapSighashType::All,
+            Some(TEST_FEE + 1000), // Adding additional fee
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Fee"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_previous_outputs() {
+        let utxos = vec![get_dummy_utxo(), get_dummy_utxo(), get_dummy_utxo()];
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let dummy_pubkey = XOnlyPublicKey::from_slice(&[2u8; 32]).unwrap();
+        let address = Address::p2tr(&secp, dummy_pubkey, None, Network::Regtest);
+
+        let outputs = create_previous_outputs(&utxos, &address);
+
+        assert_eq!(
+            outputs.len(),
+            utxos.len(),
+            "Output count should match UTXO count"
+        );
+
+        for (output, utxo) in outputs.iter().zip(utxos.iter()) {
+            assert_eq!(output.value, Amount::from_sat(utxo.value));
+            assert_eq!(output.script_pubkey, address.script_pubkey());
+        }
+
+        // Test with empty UTXOs
+        let empty_utxos: Vec<Utxo> = vec![];
+        let empty_outputs = create_previous_outputs(&empty_utxos, &address);
+        assert_eq!(empty_outputs.len(), 0);
+
+        // Test with single UTXO
+        let single_utxo = vec![get_dummy_utxo()];
+        let single_outputs = create_previous_outputs(&single_utxo, &address);
+        assert_eq!(single_outputs.len(), 1);
+        assert_eq!(
+            single_outputs[0].value,
+            Amount::from_sat(single_utxo[0].value)
+        );
+        assert_eq!(single_outputs[0].script_pubkey, address.script_pubkey());
+    }
+
+    #[test]
+    fn test_dust_limit_validation() {
+        assert!(!is_above_dust_limit(545)); // Below dust limit
+        assert!(is_above_dust_limit(546)); // At dust limit
+        assert!(is_above_dust_limit(1000)); // Above dust limit
+    }
+}

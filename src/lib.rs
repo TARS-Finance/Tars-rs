@@ -4,6 +4,9 @@ pub use api;
 #[cfg(feature = "bitcoin")]
 pub use bitcoin;
 
+#[cfg(feature = "evm")]
+pub use evm;
+
 #[cfg(feature = "orderbook")]
 pub use orderbook;
 

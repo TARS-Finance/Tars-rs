@@ -6,16 +6,18 @@ use alloy::{
     primitives::{ruint::aliases::U256, Address, Bytes, FixedBytes},
 };
 use eyre::Result;
-use primitives::{
-    HTLCAction, HTLCVersion, ALPEN, ALPEN_REGTEST, ALPEN_SIGNET, BITCOIN, BITCOIN_REGTEST,
-    BITCOIN_TESTNET,
-};
+use primitives::{HTLCAction, HTLCVersion};
 use serde::{Deserialize, Serialize};
 use sqlx::types::BigDecimal;
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::str::FromStr;
 use utils::deserialize_csv_field;
+
+/// Supported Bitcoin networks
+const BITCOIN_MAINNET: &str = "bitcoin";
+const BITCOIN_TESTNET: &str = "bitcoin_testnet";
+const BITCOIN_REGTEST: &str = "bitcoin_regtest";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SwapChain {
@@ -43,32 +45,11 @@ pub struct OrderQueryFilters {
     pub tx_hash: Option<String>,
     pub from_chain: Option<ChainName>,
     pub to_chain: Option<ChainName>,
-
-    #[serde(deserialize_with = "deserialize_csv_field")]
-    pub from_owner: Option<HashSet<String>>,
-    #[serde(deserialize_with = "deserialize_csv_field")]
-    pub to_owner: Option<HashSet<String>>,
-    #[serde(deserialize_with = "deserialize_csv_field")]
-    pub solver_id: Option<HashSet<String>>,
-    #[serde(deserialize_with = "deserialize_csv_field")]
-    pub integrator: Option<HashSet<String>>,
+    pub from_owner: Option<String>,
+    pub to_owner: Option<String>,
 
     #[serde(deserialize_with = "deserialize_csv_field")]
     pub status: Option<HashSet<OrderStatusVerbose>>,
-}
-
-impl OrderQueryFilters {
-    pub fn are_empty(&self) -> bool {
-        self.address.is_none()
-            && self.tx_hash.is_none()
-            && self.from_chain.is_none()
-            && self.to_chain.is_none()
-            && self.from_owner.is_none()
-            && self.to_owner.is_none()
-            && self.solver_id.is_none()
-            && self.integrator.is_none()
-            && self.status.is_none()
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
@@ -83,9 +64,6 @@ pub enum OrderStatusVerbose {
     Expired,
     #[serde(rename = "refunded")]
     Refunded,
-    // display status is used to display the order in the UI
-    #[serde(rename = "display")]
-    Display,
 }
 impl Default for OrderQueryFilters {
     fn default() -> Self {
@@ -99,8 +77,6 @@ impl Default for OrderQueryFilters {
             status: None,
             from_owner: None,
             to_owner: None,
-            solver_id: None,
-            integrator: None,
         }
     }
 }
@@ -115,7 +91,6 @@ impl FromStr for OrderStatusVerbose {
             "completed" | "fulfilled" => Ok(OrderStatusVerbose::Completed),
             "expired" => Ok(OrderStatusVerbose::Expired),
             "refunded" => Ok(OrderStatusVerbose::Refunded),
-            "display" => Ok(OrderStatusVerbose::Display),
             _ => Err(OrderbookError::InvalidParams(format!(
                 "Invalid order status: {}",
                 s
@@ -133,10 +108,8 @@ impl OrderQueryFilters {
         from_chain: Option<ChainName>,
         to_chain: Option<ChainName>,
         status: Option<HashSet<OrderStatusVerbose>>,
-        from_owner: Option<HashSet<String>>,
-        to_owner: Option<HashSet<String>>,
-        solver_id: Option<HashSet<String>>,
-        integrator: Option<HashSet<String>>,
+        from: Option<String>,
+        to: Option<String>,
     ) -> Result<Self, OrderbookError> {
         if !(0..=PAGE_LIMIT).contains(&limit) {
             return Err(OrderbookError::InvalidParams(format!(
@@ -152,10 +125,8 @@ impl OrderQueryFilters {
             from_chain,
             to_chain,
             status,
-            from_owner,
-            to_owner,
-            solver_id,
-            integrator,
+            from_owner: from,
+            to_owner: to,
         })
     }
 
@@ -183,25 +154,25 @@ impl OrderQueryFilters {
 pub struct ChainName(String);
 
 impl ChainName {
-    /// Create a new ChainName from a string
-    pub fn new(s: String) -> Self {
-        Self(s)
+    /// Create a new ChainName from a string slice
+    pub fn new(s: &str) -> Self {
+        Self(s.to_string())
     }
 
     /// Convenience constructor for Ethereum local network
     pub fn ethereum_localnet() -> Self {
-        Self::new("ethereum_localnet".to_string())
+        Self::new("ethereum_localnet")
     }
 
     /// Convenience constructor for Arbitrum local network
     pub fn arbitrum_localnet() -> Self {
-        Self::new("arbitrum_localnet".to_string())
+        Self::new("arbitrum_localnet")
     }
 }
 
 impl From<&SingleSwap> for ChainName {
     fn from(value: &SingleSwap) -> Self {
-        Self::new(value.chain.to_string())
+        Self::new(&value.chain)
     }
 }
 
@@ -304,14 +275,6 @@ pub struct AdditionalData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitcoin_optional_recipient: Option<String>,
 
-    // source_recipient address for utxo based source chain other than bitcoin (alpen , zcash...)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_recipient: Option<String>,
-
-    /// destination_recipient address for utxo based destination chain other than bitcoin (alpen , zcash...)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub destination_recipient: Option<String>,
-
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_delegator: Option<String>,
     /// Price of the input token at time of order creation
@@ -325,12 +288,6 @@ pub struct AdditionalData {
 
     /// Unix timestamp after which the order is no longer valid
     pub deadline: i64,
-
-    /// Unix timestamp after which the source initiate detection is no longer valid
-    ///
-    /// Backward compatible with older orders
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub src_init_detection_deadline: Option<i64>,
 
     /// Optional serialized transaction for instant refunds
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -346,7 +303,7 @@ pub struct AdditionalData {
 
     /// Flag indicating if this order is blacklisted
     #[serde(default)]
-    pub is_blacklisted: Option<bool>,
+    pub is_blacklisted: bool,
 
     /// Optional integrator for the order
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -375,8 +332,6 @@ impl From<AdditionalData> for SignableAdditionalData {
             input_token_price: value.input_token_price,
             output_token_price: value.output_token_price,
             deadline: value.deadline,
-            source_recipient: value.source_recipient.clone(),
-            destination_recipient: value.destination_recipient.clone(),
         }
     }
 }
@@ -393,14 +348,6 @@ pub struct SignableAdditionalData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitcoin_optional_recipient: Option<String>,
 
-    // source_recipient address for utxo based source chain other than bitcoin (alpen , zcash...)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_recipient: Option<String>,
-
-    /// destination_recipient address for utxo based destination chain other than bitcoin (alpen , zcash...)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub destination_recipient: Option<String>,
-
     /// Price of the input token at time of order creation
     pub input_token_price: f64,
 
@@ -415,19 +362,11 @@ pub struct SignableAdditionalData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreatableAdditionalData {
     /// Unique identifier for the trading strategy used
-    pub strategy_id: Option<String>,
+    pub strategy_id: String,
 
     /// Optional Bitcoin recipient address for cross-chain orders
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitcoin_optional_recipient: Option<String>,
-
-    // source_recipient address for utxo based source chain other than bitcoin (alpen , zcash...)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_recipient: Option<String>,
-
-    /// destination_recipient address for utxo based destination chain other than bitcoin (alpen , zcash...)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub destination_recipient: Option<String>,
 
     /// Price of the input token at time of order creation
     pub input_token_price: Option<f64>,
@@ -441,17 +380,11 @@ pub struct CreatableAdditionalData {
     /// Unix timestamp after which the order is no longer valid
     pub deadline: Option<i64>,
 
-    /// Unix timestamp after which source initiate detection is no longer valid
-    pub src_init_detection_deadline: Option<i64>,
-
     /// Slippage for the order in basis points
     pub slippage: Option<u64>,
 
     /// Source delegator for the order
     pub source_delegator: Option<String>,
-
-    /// Identifier for the solver
-    pub solver_id: Option<String>,
 }
 
 impl TryFrom<CreatableAdditionalData> for AdditionalData {
@@ -459,13 +392,9 @@ impl TryFrom<CreatableAdditionalData> for AdditionalData {
 
     fn try_from(value: CreatableAdditionalData) -> Result<Self, Self::Error> {
         Ok(AdditionalData {
-            strategy_id: value
-                .strategy_id
-                .ok_or_else(|| eyre::eyre!("strategy_id is required"))?,
+            strategy_id: value.strategy_id.clone(),
             bitcoin_optional_recipient: value.bitcoin_optional_recipient.clone(),
             source_delegator: value.source_delegator.clone(),
-            source_recipient: value.source_recipient.clone(),
-            destination_recipient: value.destination_recipient.clone(),
             input_token_price: value
                 .input_token_price
                 .ok_or_else(|| eyre::eyre!("input_token_price is required"))?,
@@ -478,11 +407,10 @@ impl TryFrom<CreatableAdditionalData> for AdditionalData {
             deadline: value
                 .deadline
                 .ok_or_else(|| eyre::eyre!("deadline is required"))?,
-            src_init_detection_deadline: value.src_init_detection_deadline,
             instant_refund_tx_bytes: None,
             redeem_tx_bytes: None,
             tx_hash: None,
-            is_blacklisted: None,
+            is_blacklisted: false,
             integrator: None,
             bitcoin: None,
             version: HTLCVersion::V1,
@@ -707,7 +635,6 @@ pub struct OrderV2 {
     pub slippage: Option<u64>,
     pub secret_hash: Option<String>,
     pub nonce: Option<BigDecimal>,
-    pub solver_id: Option<String>,
     /// Affiliate fees for the order
     #[serde(default)]
     pub affiliate_fees: AffiliateFeesV2,
@@ -836,10 +763,6 @@ pub struct CreateOrder {
     /// Affiliate fees for the order
     #[sqlx(json)]
     pub affiliate_fees: Option<Vec<AffiliateFee>>,
-
-    /// Identifier of the solver
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub solver_id: Option<String>,
 
     /// Additional data for the order
     #[sqlx(json)]
@@ -1110,16 +1033,7 @@ impl SingleSwap {
     pub fn is_bitcoin(&self) -> bool {
         matches!(
             self.chain.to_lowercase().as_str(),
-            BITCOIN | BITCOIN_REGTEST | BITCOIN_TESTNET
-        )
-    }
-
-    /// Check if this swap is on a Alpen net
-    #[inline]
-    pub fn is_alpen(&self) -> bool {
-        matches!(
-            self.chain.to_lowercase().as_str(),
-            ALPEN | ALPEN_REGTEST | ALPEN_SIGNET
+            BITCOIN_MAINNET | BITCOIN_REGTEST | BITCOIN_TESTNET
         )
     }
 }
@@ -1271,9 +1185,6 @@ pub struct MatchedOrderVerboseV2 {
     /// Nonce for the order. Random if not provided by the user
     pub nonce: BigDecimal,
 
-    /// Unix timestamp after which the order is no longer valid
-    pub deadline: i64,
-
     /// Unique ID of the order
     pub order_id: String,
 
@@ -1287,10 +1198,6 @@ pub struct MatchedOrderVerboseV2 {
 
     /// Version of the HTLC Contract being used
     pub version: HTLCVersion,
-
-    /// Identifier of the solver
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub solver_id: Option<String>,
 }
 
 impl MatchedOrderVerbose {
@@ -1321,27 +1228,6 @@ impl MatchedOrderVerbose {
             .clone()
             .ok_or_else(|| eyre::eyre!("bitcoin_optional_recipient is not set"))?;
 
-        Ok(recipient_address_str)
-    }
-
-    pub fn get_destination_recipient(&self) -> Result<String> {
-        let recipient_address_str = self
-            .create_order
-            .additional_data
-            .destination_recipient
-            .clone()
-            .ok_or_else(|| eyre::eyre!("destination_recipient is not set"))?;
-
-        Ok(recipient_address_str)
-    }
-
-    pub fn get_source_recipient(&self) -> Result<String> {
-        let recipient_address_str = self
-            .create_order
-            .additional_data
-            .source_recipient
-            .clone()
-            .ok_or_else(|| eyre::eyre!("source_recipient is not set"))?;
         Ok(recipient_address_str)
     }
 }
@@ -1551,4 +1437,74 @@ pub struct StatsQueryFilters {
 
     /// Optional Unix timestamp marking the end time for the query window
     pub to: Option<i64>, // Unix timestamp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct TestStruct {
+        #[serde(default)]
+        version: HTLCVersion,
+    }
+
+    #[test]
+    fn test_htlc_version_json_serialization() {
+        // Test V1 serialization
+        let v1 = HTLCVersion::V1;
+        let json = serde_json::to_string(&v1).unwrap();
+        assert_eq!(json, r#""v1""#);
+
+        // Test V2 serialization
+        let v2 = HTLCVersion::V2;
+        let json = serde_json::to_string(&v2).unwrap();
+        assert_eq!(json, r#""v2""#);
+
+        // Test in a struct
+        let test = TestStruct {
+            version: HTLCVersion::V1,
+        };
+        let json = serde_json::to_string(&test).unwrap();
+        assert_eq!(json, r#"{"version":"v1"}"#);
+    }
+
+    #[test]
+    fn test_htlc_version_json_deserialization() {
+        // Test V1 deserialization (case insensitive)
+        let v1: HTLCVersion = serde_json::from_str(r#""v1""#).unwrap();
+        assert_eq!(v1, HTLCVersion::V1);
+
+        // Test V2 deserialization (case insensitive)
+        let v2: HTLCVersion = serde_json::from_str(r#""v2""#).unwrap();
+        assert_eq!(v2, HTLCVersion::V2);
+
+        // Test in a struct
+        let test: TestStruct = serde_json::from_str(r#"{"version":"v1"}"#).unwrap();
+        assert_eq!(test.version, HTLCVersion::V1);
+
+        // Test missing field in struct (should use default V1)
+        let test: TestStruct = serde_json::from_str("{}").unwrap();
+        assert_eq!(test.version, HTLCVersion::V1);
+    }
+
+    #[test]
+    fn test_htlc_version_from_str() {
+        assert_eq!(HTLCVersion::from_str("v1"), Some(HTLCVersion::V1));
+        assert_eq!(HTLCVersion::from_str("v2"), Some(HTLCVersion::V2));
+        assert_eq!(HTLCVersion::from_str("v3"), Some(HTLCVersion::V3));
+        assert_eq!(HTLCVersion::from_str(""), None);
+    }
+
+    #[test]
+    fn test_htlc_version_as_str() {
+        assert_eq!(HTLCVersion::V1.as_str(), "v1");
+        assert_eq!(HTLCVersion::V2.as_str(), "v2");
+    }
+
+    #[test]
+    fn test_htlc_version_default() {
+        assert_eq!(HTLCVersion::default(), HTLCVersion::V1);
+    }
 }

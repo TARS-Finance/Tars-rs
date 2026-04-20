@@ -60,17 +60,6 @@ pub trait Orderbook {
         &self,
     ) -> Result<Vec<primitives::MatchedOrderVerbose>, OrderbookError>;
 
-    /// Returns the matched order by source or destination swap id
-    async fn get_matched_order_by_swap_id(
-        &self,
-        swap_id: &str,
-    ) -> Result<Option<primitives::MatchedOrderVerbose>, OrderbookError>;
-
-    /// Returns unscreened orders (initiated, confirmed, without is_blacklisted set)
-    async fn get_unscreened_orders(
-        &self,
-    ) -> Result<Vec<primitives::MatchedOrderVerbose>, OrderbookError>;
-
     /// Returns the total amount yet to be initiated by solver which is already initiated by user
     async fn get_solver_committed_funds(
         &self,
@@ -91,7 +80,6 @@ pub trait Orderbook {
         initiate_tx_hash: &str,
         initiate_block_number: i64,
         initiate_timestamp: chrono::DateTime<chrono::Utc>,
-        asset: &str,
     ) -> Result<(), OrderbookError>;
 
     /// Updates a swap with redeem details
@@ -102,7 +90,6 @@ pub trait Orderbook {
         secret: &str,
         redeem_block_number: i64,
         redeem_timestamp: chrono::DateTime<chrono::Utc>,
-        asset: &str,
     ) -> Result<(), OrderbookError>;
 
     /// Updates a swap with refund details
@@ -112,7 +99,6 @@ pub trait Orderbook {
         refund_tx_hash: &str,
         refund_block_number: i64,
         refund_timestamp: chrono::DateTime<chrono::Utc>,
-        asset: &str,
     ) -> Result<(), OrderbookError>;
 
     /// Updates current_confirmations of all the swaps on given chain
@@ -143,14 +129,6 @@ pub trait Orderbook {
         redeem_tx_bytes: &str,
         redeem_tx_id: &str,
         secret: &str,
-    ) -> Result<(), OrderbookError>;
-
-    /// Merges the given key-value pairs into create_order.additional_data.
-    /// Existing keys are updated; new keys are added.
-    async fn update_additional_data(
-        &self,
-        create_id: &str,
-        data: &HashMap<String, serde_json::Value>,
     ) -> Result<(), OrderbookError>;
 
     /// Returns the swaps volume for a given query

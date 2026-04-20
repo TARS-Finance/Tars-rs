@@ -268,3 +268,119 @@ impl Indexer for BitcoinIndexerClient {
         Ok(outspends)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils::get_test_bitcoin_indexer;
+
+    use super::*;
+    use alloy::hex;
+    use bitcoin::{Address, Transaction};
+    use std::str::FromStr;
+
+    #[tokio::test]
+    async fn test_post_tx() {
+        let client = get_test_bitcoin_indexer().unwrap();
+
+        // Test transaction hex (large hex string from original test)
+        const TX_HEX: &str = "02000000000101b0c69f30508c8c9c8f3c30bb7290e7d8088cd06265c1951b6c701b8a5a1e245a0000000000ffffffff01f0ca052a0100000017a914f0c1ed22d8aef66040b9970e26d0970b72d92a72870247304402201758dfd2c8e1d5cd9c899bc07d85b34b8b1ff6f7098dc2ccdf5aa32e2516ec3f0220672bcedb857e17e3d1eb5a005f5c0d9ea4516a4ffb5d7fd7e47a32a67acbdfb5012102c6e3e9b1c0d3947aeac624042d7ccbe3816d0fa9d90f6f9725eb50e87b3b0be300000000";
+
+        let tx_bytes = hex::decode(TX_HEX).expect("Should be valid hex");
+        let tx: Transaction =
+            bitcoin::consensus::deserialize(&tx_bytes).expect("Should be valid transaction");
+
+        // Submit tx (this test will be skipped if the indexer is not running)
+        let res = client.submit_tx(&tx).await;
+        println!("Transaction submission result: {:?}", res);
+    }
+
+    #[tokio::test]
+    async fn test_get_utxos() {
+        let client = get_test_bitcoin_indexer().unwrap();
+
+        // Create a test address
+        let address = Address::from_str("bcrt1q556lc447reahwdq24ur5q4xsqs099fja78lq6p")
+            .expect("Should be valid address")
+            .assume_checked();
+
+        let result = client.get_utxos(&address).await;
+        assert!(result.is_ok(), "Should successfully get UTXOs");
+    }
+
+    #[tokio::test]
+    async fn test_get_block_height() {
+        let client = get_test_bitcoin_indexer().unwrap();
+
+        // Get the current block height
+        let height = client
+            .get_block_height()
+            .await
+            .expect("Should get block height");
+
+        // Assert that the result contains a non-zero height
+        assert!(height > 0, "Block height should be greater than 0");
+    }
+
+    #[tokio::test]
+    async fn test_get_tx_outspends() {
+        let indexer_url = "https://mempool.space/testnet4/api".to_string();
+        let client = BitcoinIndexerClient::new(indexer_url, None).expect("Should create client");
+
+        // Test transaction ID that should have at least one outspent
+        let txid = "b6ab6b9eb55e4e43d68e40f9acbd36079fd30688e292235d3d9801ef227f9e5c";
+
+        // Get the outspends for this transaction
+        let outspends = client
+            .get_tx_outspends(txid)
+            .await
+            .expect("Should successfully get transaction outspends");
+
+        // Verify that there is at least one outspent
+        assert!(
+            !outspends.is_empty(),
+            "Transaction {} should have at least one outspent",
+            txid
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_tx_hex() {
+        let indexer_url = "https://mempool.space/testnet4/api".to_string();
+        let client = BitcoinIndexerClient::new(indexer_url, None).expect("Should create client");
+
+        // Test transaction ID that should exist on testnet
+        let txid = "b6ab6b9eb55e4e43d68e40f9acbd36079fd30688e292235d3d9801ef227f9e5c";
+
+        // Get the transaction hex
+        let tx = client
+            .get_tx_hex(txid)
+            .await
+            .expect("Should successfully get transaction hex");
+
+        // Verify the transaction metadata has the expected structure
+        assert_eq!(
+            tx.compute_txid().to_string(),
+            txid,
+            "Transaction ID should match"
+        );
+        assert!(!tx.input.is_empty(), "Transaction should have inputs");
+        assert!(!tx.output.is_empty(), "Transaction should have outputs");
+    }
+
+    #[tokio::test]
+    async fn test_get_tx() {
+        let indexer_url = "https://mempool.space/testnet4/api".to_string();
+        let client = BitcoinIndexerClient::new(indexer_url, None).expect("Should create client");
+
+        // Test transaction ID that should exist on testnet
+        let txid = "b6ab6b9eb55e4e43d68e40f9acbd36079fd30688e292235d3d9801ef227f9e5c";
+
+        // Get the transaction metadata
+        let tx_metadata = client
+            .get_tx(txid)
+            .await
+            .expect("Should successfully get transaction metadata");
+
+        assert!(!tx_metadata.txid.is_empty(), "Transaction should have Txid");
+    }
+}

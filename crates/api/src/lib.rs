@@ -1,6 +1,5 @@
-pub mod errors;
+mod errors;
 pub mod primitives;
-pub mod utils;
-
+mod utils;
 pub use errors::*;
-pub use utils::{handle_response, join_url_path};
+pub use utils::join_url_path;

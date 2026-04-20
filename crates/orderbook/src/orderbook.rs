@@ -7,7 +7,6 @@ use crate::{
         SingleSwap, StatsQueryFilters, SwapChain,
     },
     traits::Orderbook,
-    DbPool, Pool,
 };
 use async_trait::async_trait;
 use bigdecimal::num_bigint::{BigInt, ToBigInt};
@@ -15,36 +14,26 @@ use bigdecimal::{BigDecimal, FromPrimitive};
 use chrono::{DateTime, Utc};
 use eyre::Result;
 use serde_json::json;
-use sqlx::{Postgres, QueryBuilder, Row};
-use std::{
-    collections::{HashMap, HashSet},
-    time::Duration,
-};
-use tokio::time::timeout;
+use sqlx::{Pool, Postgres, QueryBuilder, Row, Transaction};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 // The `Orderbook` trait implementation. Provides various orderbook queries direct from db.
 pub struct OrderbookProvider {
-    pub pool: Pool,
-    pub sqlx_pool: sqlx::Pool<Postgres>,
+    pub pool: Pool<Postgres>,
 }
 
 impl OrderbookProvider {
-    pub fn new(pool: Pool, sqlx_pool: sqlx::Pool<Postgres>) -> Self {
-        OrderbookProvider { pool, sqlx_pool }
+    pub fn new(pool: Pool<Postgres>) -> Self {
+        OrderbookProvider { pool }
     }
 
     pub async fn from_db_url(db_url: &str) -> Result<Self> {
-        let pool = DbPool::new(db_url, 150)?;
-        let sqlx_pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(150)
-            .min_connections(10)
-            .acquire_timeout(Duration::from_secs(30))
-            .idle_timeout(Some(Duration::from_secs(10 * 60)))
-            .max_lifetime(Some(Duration::from_secs(30 * 60)))
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2000)
             .connect(db_url)
             .await?;
-        Ok(Self::new(pool, sqlx_pool))
+        Ok(Self::new(pool))
     }
 }
 
@@ -56,8 +45,6 @@ impl Orderbook for OrderbookProvider {
         order_id: &str,
         chain: SwapChain,
     ) -> Result<Option<primitives::SingleSwap>, OrderbookError> {
-        let conn = &mut *self.pool.get().await?;
-
         let statement = match chain {
             SwapChain::Source =>  "SELECT * FROM swaps JOIN matched_orders mo on swaps.swap_id = mo.source_swap_id WHERE mo.create_order_id = $1",
             SwapChain::Destination => "SELECT * FROM swaps JOIN matched_orders mo on swaps.swap_id = mo.destination_swap_id WHERE mo.create_order_id = $1",
@@ -65,7 +52,7 @@ impl Orderbook for OrderbookProvider {
 
         let swap = sqlx::query_as::<_, SingleSwap>(&statement)
             .bind(order_id)
-            .fetch_optional(conn)
+            .fetch_optional(&self.pool)
             .await?;
 
         Ok(swap)
@@ -77,8 +64,6 @@ impl Orderbook for OrderbookProvider {
         chain: &str,
         asset: &str,
     ) -> Result<BigDecimal, OrderbookError> {
-        let conn = &mut *self.pool.get().await?;
-
         // lowercase the address
         let addr = addr.to_lowercase();
         let asset = asset.to_lowercase();
@@ -94,7 +79,7 @@ impl Orderbook for OrderbookProvider {
             .bind(chain)
             .bind(&addr)
             .bind(&asset)
-            .fetch_optional(conn)
+            .fetch_optional(&self.pool)
             .await?
             .unwrap_or(BigDecimal::from(0));
 
@@ -102,12 +87,11 @@ impl Orderbook for OrderbookProvider {
     }
 
     async fn exists(&self, secret_hash: &str) -> Result<bool, OrderbookError> {
-        let conn = &mut *self.pool.get().await?;
         const EXISTS_QUERY: &str =
             "SELECT EXISTS(SELECT 1 FROM create_orders WHERE secret_hash = $1)";
         let exists = sqlx::query_scalar::<_, bool>(EXISTS_QUERY)
             .bind(secret_hash)
-            .fetch_one(conn)
+            .fetch_one(&self.pool)
             .await?;
 
         Ok(exists)
@@ -117,76 +101,107 @@ impl Orderbook for OrderbookProvider {
         &self,
         filters: OrderQueryFilters,
     ) -> Result<PaginatedData<primitives::MatchedOrderVerbose>, OrderbookError> {
-        let mut conn = self.pool.get().await?;
         const BASE_JOINS: &str = "FROM matched_orders mo
             JOIN create_orders co ON mo.create_order_id = co.create_id
             JOIN swaps ss1 ON mo.source_swap_id = ss1.swap_id
             JOIN swaps ss2 ON mo.destination_swap_id = ss2.swap_id";
-        const SELECT_COLUMNS: &str = "SELECT
-            mo.created_at,
-            mo.updated_at,
-            mo.deleted_at,
-            co.*,
-            row_to_json(ss1.*) as source_swap,
-            row_to_json(ss2.*) as destination_swap
-            ";
 
-        // When a tx_hash filter is present, try progressively broader match strategies:
-        //   Exact → Prefix → Contains
-        // Return as soon as a phase finds results, avoiding the slower strategies.
-        // Without a tx_hash filter, only one iteration runs (mode is unused).
-        let modes = if filters.tx_hash.is_some() {
-            &TxHashMatchMode::PHASES[..]
-        } else {
-            &TxHashMatchMode::PHASES[..1]
-        };
+        let orders = {
+            let mut builder = QueryBuilder::<Postgres>::new(
+                "SELECT
+                    mo.created_at,
+                    mo.updated_at,
+                    mo.deleted_at,
+                    co.*,
+                    row_to_json(ss1.*) as source_swap,
+                    row_to_json(ss2.*) as destination_swap
+                    ",
+            );
+            builder.push(BASE_JOINS);
 
-        for &mode in modes {
-            let orders = {
-                let mut builder = QueryBuilder::<Postgres>::new(SELECT_COLUMNS);
-                builder.push(BASE_JOINS);
-                builder.apply_order_filters(&filters, mode);
-                builder.push(" ORDER BY mo.created_at DESC LIMIT ");
-                builder.push_bind(filters.per_page());
-                builder.push(" OFFSET ");
-                builder.push_bind(filters.offset());
-                builder
-                    .build_query_as::<primitives::MatchedOrderVerbose>()
-                    .fetch_all(&mut *conn)
-                    .await?
-            };
+            if let Some(address) = &filters.address {
+                builder.add_address_filter(address);
+            } else {
+                if let Some(from) = &filters.from_owner {
+                    builder.add_from_owner_filter(from);
+                }
 
-            if filters.tx_hash.is_some() && orders.is_empty() {
-                continue;
+                if let Some(to) = &filters.to_owner {
+                    builder.add_to_owner_filter(to);
+                }
             }
 
-            let item_count = if !filters.are_empty() {
-                let mut builder = QueryBuilder::<Postgres>::new("SELECT COUNT(*) ");
-                builder.push(BASE_JOINS);
-                builder.apply_order_filters(&filters, mode);
-                builder
-                    .build_query_scalar::<i64>()
-                    .fetch_one(&mut *conn)
-                    .await?
+            if let Some(tx_hash) = &filters.tx_hash {
+                builder.add_tx_hash_filter(tx_hash);
+            }
+
+            if let Some(from_chain) = &filters.from_chain {
+                builder.add_chain_filter("ss1.chain", from_chain.as_ref());
+            }
+
+            if let Some(to_chain) = &filters.to_chain {
+                builder.add_chain_filter("ss2.chain", to_chain.as_ref());
+            }
+
+            if let Some(statuses) = &filters.status {
+                builder.add_statuses_filter(&statuses);
+            }
+
+            builder.push(" ORDER BY mo.created_at DESC LIMIT ");
+            builder.push_bind(filters.per_page());
+            builder.push(" OFFSET ");
+            builder.push_bind(filters.offset());
+
+            builder
+                .build_query_as::<primitives::MatchedOrderVerbose>()
+                .fetch_all(&self.pool)
+                .await?
+        };
+
+        // Build count query
+        let item_count = {
+            let mut builder = QueryBuilder::<Postgres>::new("SELECT COUNT(*) ");
+            builder.push(BASE_JOINS);
+
+            if let Some(address) = &filters.address {
+                builder.add_address_filter(address);
             } else {
-                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM matched_orders")
-                    .fetch_one(&mut *conn)
-                    .await?
-            };
+                if let Some(from) = &filters.from_owner {
+                    builder.add_from_owner_filter(from);
+                }
 
-            return Ok(PaginatedData::new(
-                orders,
-                filters.page(),
-                item_count,
-                filters.per_page(),
-            ));
-        }
+                if let Some(to) = &filters.to_owner {
+                    builder.add_to_owner_filter(to);
+                }
+            }
 
-        // All match modes exhausted with no results
+            if let Some(tx_hash) = &filters.tx_hash {
+                builder.add_tx_hash_filter(tx_hash);
+            }
+
+            if let Some(from_chain) = &filters.from_chain {
+                builder.add_chain_filter("ss1.chain", from_chain.as_ref());
+            }
+
+            if let Some(to_chain) = &filters.to_chain {
+                builder.add_chain_filter("ss2.chain", to_chain.as_ref());
+            }
+
+            if let Some(statuses) = &filters.status {
+                builder.add_statuses_filter(statuses);
+            }
+
+            builder
+                .build_query_scalar::<i64>()
+                .fetch_one(&self.pool)
+                .await?
+        };
+
+        // Return paginated data
         Ok(PaginatedData::new(
-            vec![],
+            orders,
             filters.page(),
-            0,
+            item_count,
             filters.per_page(),
         ))
     }
@@ -195,8 +210,6 @@ impl Orderbook for OrderbookProvider {
         &self,
         create_id: &str,
     ) -> Result<Option<primitives::MatchedOrderVerbose>, OrderbookError> {
-        let conn = &mut *self.pool.get().await?;
-
         // Query for retrieving a specific matched order with its related data
         const MATCHED_ORDER_QUERY: &str = "SELECT
         mo.created_at,
@@ -215,7 +228,7 @@ impl Orderbook for OrderbookProvider {
         let matched_order =
             sqlx::query_as::<_, primitives::MatchedOrderVerbose>(MATCHED_ORDER_QUERY)
                 .bind(create_id)
-                .fetch_optional(conn)
+                .fetch_optional(&self.pool)
                 .await?;
 
         Ok(matched_order)
@@ -226,8 +239,6 @@ impl Orderbook for OrderbookProvider {
         user: &str,
         filters: OrderQueryFilters,
     ) -> Result<PaginatedData<primitives::MatchedOrderVerbose>, OrderbookError> {
-        let mut conn = self.pool.get().await?;
-
         // Convert user address to lowercase for case-insensitive comparison
         let user_lowercase = user.to_lowercase();
 
@@ -289,7 +300,7 @@ impl Orderbook for OrderbookProvider {
             .bind(filters.per_page())
             .bind(filters.offset())
             .bind(current_time)
-            .fetch_all(&mut *conn)
+            .fetch_all(&self.pool)
             .await?;
 
         // Build the count query, similar to orders query but for counting
@@ -329,7 +340,7 @@ impl Orderbook for OrderbookProvider {
         let item_count = sqlx::query_scalar::<_, i64>(&count_query)
             .bind(&user_lowercase)
             .bind(current_time)
-            .fetch_one(&mut *conn)
+            .fetch_one(&self.pool)
             .await?;
 
         // Return paginated data
@@ -346,8 +357,6 @@ impl Orderbook for OrderbookProvider {
         order_id: &str,
         instant_refund_tx_bytes: &str,
     ) -> Result<(), OrderbookError> {
-        let conn = &mut *self.pool.get().await?;
-
         // Create the JSON payload to update order's additional_data
         let additional_data = json!({
             "instant_refund_tx_bytes": instant_refund_tx_bytes
@@ -362,7 +371,7 @@ impl Orderbook for OrderbookProvider {
         let update_result = sqlx::query(UPDATE_QUERY)
             .bind(order_id)
             .bind(additional_data)
-            .execute(conn)
+            .execute(&self.pool)
             .await?;
 
         if update_result.rows_affected() == 0 {
@@ -381,8 +390,6 @@ impl Orderbook for OrderbookProvider {
         redeem_tx_id: &str,
         secret: &str,
     ) -> Result<(), OrderbookError> {
-        let mut conn = self.pool.get().await?;
-
         // Create the JSON payload with the redeem transaction bytes
         let additional_data = json!({
             "redeem_tx_bytes": redeem_tx_bytes
@@ -397,7 +404,7 @@ impl Orderbook for OrderbookProvider {
         let order_update_result = sqlx::query(CREATE_ORDER_UPDATE)
             .bind(order_id)
             .bind(&additional_data)
-            .execute(&mut *conn)
+            .execute(&self.pool)
             .await?;
 
         if order_update_result.rows_affected() == 0 {
@@ -420,7 +427,7 @@ impl Orderbook for OrderbookProvider {
             .bind(redeem_tx_id)
             .bind(secret)
             .bind(order_id)
-            .execute(&mut *conn)
+            .execute(&self.pool)
             .await?;
 
         if destination_swap_update_result.rows_affected() == 0 {
@@ -432,44 +439,11 @@ impl Orderbook for OrderbookProvider {
         Ok(())
     }
 
-    async fn update_additional_data(
-        &self,
-        create_id: &str,
-        data: &HashMap<String, serde_json::Value>,
-    ) -> Result<(), OrderbookError> {
-        if data.is_empty() {
-            return Ok(());
-        }
-        let conn = &mut *self.pool.get().await?;
-
-        let json_value =
-            serde_json::to_value(data).map_err(|e| OrderbookError::InternalError(e.to_string()))?;
-
-        const UPDATE_QUERY: &str = "UPDATE create_orders
-            SET additional_data = COALESCE(additional_data, '{}'::jsonb) || $1::jsonb
-            WHERE create_id = $2";
-
-        let update_result = sqlx::query(UPDATE_QUERY)
-            .bind(&json_value)
-            .bind(create_id)
-            .execute(conn)
-            .await?;
-
-        if update_result.rows_affected() == 0 {
-            return Err(OrderbookError::OrderNotFound {
-                order_id: create_id.to_string(),
-            });
-        }
-
-        Ok(())
-    }
-
     async fn get_filler_pending_orders(
         &self,
         chain_id: &str,
         filler_id: &str,
     ) -> Result<Vec<MatchedOrderVerbose>, OrderbookError> {
-        let mut conn = self.pool.get().await?;
         let orders = sqlx::query_as::<_, MatchedOrderVerbose>(
             "SELECT
                 mo.created_at,
@@ -499,14 +473,12 @@ impl Orderbook for OrderbookProvider {
         )
         .bind(chain_id)
         .bind(filler_id.to_lowercase())
-        .fetch_all(&mut *conn)
+        .fetch_all(&self.pool)
         .await?;
         Ok(orders)
     }
 
     async fn get_solver_pending_orders(&self) -> Result<Vec<MatchedOrderVerbose>, OrderbookError> {
-        let conn = &mut *self.pool.get().await?;
-
         let orders = sqlx::query_as::<_, MatchedOrderVerbose>(
             "SELECT
                 mo.created_at,
@@ -531,63 +503,8 @@ impl Orderbook for OrderbookProvider {
             ORDER BY mo.created_at ASC
             LIMIT 5000",
         )
-        .fetch_all(conn)
+        .fetch_all(&self.pool)
         .await?;
-        Ok(orders)
-    }
-
-    async fn get_matched_order_by_swap_id(
-        &self,
-        swap_id: &str,
-    ) -> Result<Option<MatchedOrderVerbose>, OrderbookError> {
-        let conn = &mut *self.pool.get().await?;
-
-        const GET_MATCHED_ORDER_BY_SWAP_ID_QUERY: &str = "SELECT
-            mo.created_at,
-            mo.updated_at,
-            mo.deleted_at,
-            co.*,
-            row_to_json(ss1.*) as source_swap,
-            row_to_json(ss2.*) as destination_swap
-            FROM matched_orders mo
-            JOIN create_orders co ON mo.create_order_id = co.create_id
-            JOIN swaps ss1 ON mo.source_swap_id = ss1.swap_id
-            JOIN swaps ss2 ON mo.destination_swap_id = ss2.swap_id
-            WHERE ss1.swap_id = $1 OR ss2.swap_id = $1";
-
-        let order = sqlx::query_as::<_, MatchedOrderVerbose>(GET_MATCHED_ORDER_BY_SWAP_ID_QUERY)
-            .bind(swap_id)
-            .fetch_optional(conn)
-            .await?;
-
-        Ok(order)
-    }
-
-    async fn get_unscreened_orders(&self) -> Result<Vec<MatchedOrderVerbose>, OrderbookError> {
-        let conn = &mut *self.pool.get().await?;
-
-        const GET_UNSCREENED_ORDERS_QUERY: &str = "SELECT
-            mo.created_at,
-            mo.updated_at,
-            mo.deleted_at,
-            co.*,
-            row_to_json(ss1.*) as source_swap,
-            row_to_json(ss2.*) as destination_swap
-            FROM matched_orders mo
-            JOIN create_orders co ON mo.create_order_id = co.create_id
-            JOIN swaps ss1 ON mo.source_swap_id = ss1.swap_id
-            JOIN swaps ss2 ON mo.destination_swap_id = ss2.swap_id
-            WHERE ss1.initiate_block_number IS NOT NULL
-                AND (ss1.initiate_block_number) != 0
-                AND (ss1.required_confirmations <= 1 OR ss1.current_confirmations >= ss1.required_confirmations)
-                AND (co.additional_data->>'is_blacklisted' IS NULL)
-            ORDER BY mo.created_at ASC
-            LIMIT 500";
-
-        let orders = sqlx::query_as::<_, MatchedOrderVerbose>(GET_UNSCREENED_ORDERS_QUERY)
-            .fetch_all(conn)
-            .await?;
-
         Ok(orders)
     }
 
@@ -598,16 +515,14 @@ impl Orderbook for OrderbookProvider {
         initiate_tx_hash: &str,
         initiate_block_number: i64,
         initiate_timestamp: chrono::DateTime<chrono::Utc>,
-        asset: &str,
     ) -> Result<(), OrderbookError> {
-        let mut conn = self.pool.get().await?;
         // SQL query to update swap initiation details
         const UPDATE_SWAP_QUERY: &str = "UPDATE swaps
             SET filled_amount = $1,
                 initiate_tx_hash = $2,
                 initiate_block_number = $3,
                 initiate_timestamp = $4
-            WHERE swap_id = $5 AND LOWER(asset) = $6";
+            WHERE swap_id = $5";
 
         // Execute the query and get the result for checking rows affected
         let update_result = sqlx::query(UPDATE_SWAP_QUERY)
@@ -616,8 +531,7 @@ impl Orderbook for OrderbookProvider {
             .bind(initiate_block_number)
             .bind(initiate_timestamp)
             .bind(order_id)
-            .bind(asset.to_lowercase())
-            .execute(&mut *conn)
+            .execute(&self.pool)
             .await?;
 
         // Check if any rows were affected by the update
@@ -637,15 +551,13 @@ impl Orderbook for OrderbookProvider {
         secret: &str,
         redeem_block_number: i64,
         redeem_timestamp: chrono::DateTime<chrono::Utc>,
-        asset: &str,
     ) -> Result<(), OrderbookError> {
-        let mut conn = self.pool.get().await?;
         const UPDATE_SWAP_QUERY: &str = "UPDATE swaps
             SET redeem_tx_hash = $1,
                 secret = $2,
                 redeem_block_number = $3,
                 redeem_timestamp = $4
-            WHERE swap_id = $5 AND LOWER(asset) = $6";
+            WHERE swap_id = $5";
 
         let res = sqlx::query(UPDATE_SWAP_QUERY)
             .bind(redeem_tx_hash)
@@ -653,8 +565,7 @@ impl Orderbook for OrderbookProvider {
             .bind(redeem_block_number)
             .bind(redeem_timestamp)
             .bind(&order_id)
-            .bind(asset.to_lowercase())
-            .execute(&mut *conn)
+            .execute(&self.pool)
             .await?;
 
         if res.rows_affected() == 0 {
@@ -671,22 +582,19 @@ impl Orderbook for OrderbookProvider {
         refund_tx_hash: &str,
         refund_block_number: i64,
         refund_timestamp: chrono::DateTime<chrono::Utc>,
-        asset: &str,
     ) -> Result<(), OrderbookError> {
-        let mut conn = self.pool.get().await?;
         const UPDATE_SWAP_QUERY: &str = "UPDATE swaps
             SET refund_tx_hash = $1,
                 refund_block_number = $2,
                 refund_timestamp = $3
-            WHERE swap_id = $4 AND LOWER(asset) = $5";
+            WHERE swap_id = $4";
 
         let res = sqlx::query(UPDATE_SWAP_QUERY)
             .bind(refund_tx_hash)
             .bind(refund_block_number)
             .bind(refund_timestamp)
             .bind(&order_id)
-            .bind(asset.to_lowercase())
-            .execute(&mut *conn)
+            .execute(&self.pool)
             .await?;
 
         if res.rows_affected() == 0 {
@@ -702,7 +610,6 @@ impl Orderbook for OrderbookProvider {
         chain_identifier: &str,
         latest_block: u64,
     ) -> Result<(), OrderbookError> {
-        let mut conn = self.pool.get().await?;
         const UPDATE_SWAP_QUERY: &str =
             "UPDATE swaps
             SET current_confirmations = LEAST(required_confirmations, $1 - initiate_block_number + 1)
@@ -713,7 +620,7 @@ impl Orderbook for OrderbookProvider {
         sqlx::query(UPDATE_SWAP_QUERY)
             .bind(latest_block as i64)
             .bind(chain_identifier)
-            .execute(&mut *conn)
+            .execute(&self.pool)
             .await?;
         Ok(())
     }
@@ -723,7 +630,6 @@ impl Orderbook for OrderbookProvider {
         query: StatsQueryFilters,
         asset_decimals: &HashMap<(String, String), u32>,
     ) -> Result<(BigInt, BigInt), OrderbookError> {
-        let mut conn = self.pool.get().await?;
         let start_time = match query.from {
             Some(from) => Some(DateTime::from_timestamp(from, 0).ok_or_else(|| {
                 OrderbookError::InvalidTimestamp("Failed to parse from timestamp".to_string())
@@ -772,7 +678,7 @@ impl Orderbook for OrderbookProvider {
                 builder.add_address_filter(&address);
             }
 
-            builder.build().fetch_all(&mut *conn).await?
+            builder.build().fetch_all(&self.pool).await?
         };
 
         let mut total_volume = BigDecimal::from(0);
@@ -873,7 +779,6 @@ impl Orderbook for OrderbookProvider {
     }
 
     async fn get_integrator_fees(&self, integrator: &str) -> Result<Vec<Claim>, OrderbookError> {
-        let mut conn = self.pool.get().await?;
         const QUERY: &str = "
             SELECT 
                 integrator_name,
@@ -889,7 +794,7 @@ impl Orderbook for OrderbookProvider {
 
         let claims = sqlx::query_as::<_, Claim>(QUERY)
             .bind(integrator)
-            .fetch_all(&mut *conn)
+            .fetch_all(&self.pool)
             .await?;
 
         Ok(claims)
@@ -899,18 +804,23 @@ impl Orderbook for OrderbookProvider {
         &self,
         order: &MatchedOrderVerbose,
     ) -> Result<(), OrderbookError> {
-        let tx_timeout = Duration::from_secs(30);
+        let mut tx: Transaction<'_, Postgres> = self.pool.begin().await?;
 
-        let result = timeout(tx_timeout, async {
-        let mut tx = self.sqlx_pool.begin().await?;
+        let is_source_bitcoin = order.source_swap.chain.contains("bitcoin");
+        let is_destination_bitcoin = order.destination_swap.chain.contains("bitcoin");
+        // Helper to normalize strings based on chain (Bitcoin addresses are case-sensitive)
+        let normalize_address = |addr: &str, is_bitcoin: bool| -> String {
+            if is_bitcoin {
+                addr.to_string()
+            } else {
+                addr.to_lowercase()
+            }
+        };
 
         // Inserting both swaps in a single query
         const INSERT_SWAPS_QUERY: &str = "
             INSERT INTO swaps (
-                created_at, updated_at, deleted_at, swap_id, chain, asset, initiator, redeemer, timelock,
-                filled_amount, amount, secret_hash, secret, initiate_tx_hash, redeem_tx_hash, refund_tx_hash,
-                initiate_block_number, redeem_block_number, refund_block_number, required_confirmations,
-                current_confirmations, htlc_address, token_address
+                created_at, updated_at, deleted_at, swap_id, chain, asset, initiator, redeemer, timelock, filled_amount, amount, secret_hash, secret, initiate_tx_hash, redeem_tx_hash, refund_tx_hash, initiate_block_number, redeem_block_number, refund_block_number, required_confirmations, current_confirmations, htlc_address, token_address
             ) VALUES
                 ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23),
                 ($24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46)
@@ -924,14 +834,20 @@ impl Orderbook for OrderbookProvider {
             .bind(&order.source_swap.deleted_at)
             .bind(&order.source_swap.swap_id)
             .bind(&order.source_swap.chain)
-            .bind(&order.source_swap.asset)
-            .bind(&order.source_swap.initiator)
-            .bind(&order.source_swap.redeemer)
+            .bind(&order.source_swap.asset.to_lowercase())
+            .bind(normalize_address(
+                &order.source_swap.initiator,
+                is_source_bitcoin,
+            ))
+            .bind(normalize_address(
+                &order.source_swap.redeemer,
+                is_source_bitcoin,
+            ))
             .bind(&order.source_swap.timelock)
             .bind(&order.source_swap.filled_amount)
             .bind(&order.source_swap.amount)
             .bind(&order.source_swap.secret_hash)
-            .bind(&order.source_swap.secret.to_string())
+            .bind(&order.source_swap.secret)
             .bind(&order.source_swap.initiate_tx_hash.to_string())
             .bind(&order.source_swap.redeem_tx_hash.to_string())
             .bind(&order.source_swap.refund_tx_hash.to_string())
@@ -940,17 +856,29 @@ impl Orderbook for OrderbookProvider {
             .bind(&order.source_swap.refund_block_number)
             .bind(&order.source_swap.required_confirmations)
             .bind(&order.source_swap.current_confirmations)
-            .bind(order.source_swap.htlc_address.as_deref().unwrap_or(""))
-            .bind(order.source_swap.token_address.as_deref().unwrap_or(""))
+            .bind(normalize_address(
+                order.source_swap.htlc_address.as_deref().unwrap_or(""),
+                is_source_bitcoin,
+            ))
+            .bind(normalize_address(
+                order.source_swap.token_address.as_deref().unwrap_or(""),
+                is_source_bitcoin,
+            ))
             // Destination swap
             .bind(&order.destination_swap.created_at)
             .bind(&order.destination_swap.updated_at)
             .bind(&order.destination_swap.deleted_at)
             .bind(&order.destination_swap.swap_id)
             .bind(&order.destination_swap.chain)
-            .bind(&order.destination_swap.asset)
-            .bind(&order.destination_swap.initiator)
-            .bind(&order.destination_swap.redeemer)
+            .bind(&order.destination_swap.asset.to_lowercase())
+            .bind(normalize_address(
+                &order.destination_swap.initiator,
+                is_destination_bitcoin,
+            ))
+            .bind(normalize_address(
+                &order.destination_swap.redeemer,
+                is_destination_bitcoin,
+            ))
             .bind(&order.destination_swap.timelock)
             .bind(&order.destination_swap.filled_amount)
             .bind(&order.destination_swap.amount)
@@ -964,8 +892,18 @@ impl Orderbook for OrderbookProvider {
             .bind(&order.destination_swap.refund_block_number)
             .bind(&order.destination_swap.required_confirmations)
             .bind(&order.destination_swap.current_confirmations)
-            .bind(order.destination_swap.htlc_address.as_deref().unwrap_or(""))
-            .bind(order.destination_swap.token_address.as_deref().unwrap_or(""))
+            .bind(normalize_address(
+                order.destination_swap.htlc_address.as_deref().unwrap_or(""),
+                is_destination_bitcoin,
+            ))
+            .bind(normalize_address(
+                order
+                    .destination_swap
+                    .token_address
+                    .as_deref()
+                    .unwrap_or(""),
+                is_destination_bitcoin,
+            ))
             .execute(&mut *tx)
             .await?;
 
@@ -978,12 +916,9 @@ impl Orderbook for OrderbookProvider {
 
         const INSERT_CREATE_ORDER_QUERY: &str = "
             INSERT INTO create_orders (
-                created_at, updated_at, deleted_at, create_id, block_number, source_chain, destination_chain,
-                source_asset, destination_asset, initiator_source_address, initiator_destination_address,
-                source_amount, destination_amount, fee, nonce, min_destination_confirmations, timelock,
-                secret_hash, user_id, affiliate_fees, solver_id,additional_data
+                created_at, updated_at, deleted_at, create_id, block_number, source_chain, destination_chain, source_asset, destination_asset, initiator_source_address, initiator_destination_address, source_amount, destination_amount, fee, nonce, min_destination_confirmations, timelock, secret_hash, user_id, affiliate_fees, additional_data
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
             )
             ON CONFLICT DO NOTHING
         ";
@@ -1001,10 +936,19 @@ impl Orderbook for OrderbookProvider {
             .bind(&co.block_number)
             .bind(&co.source_chain)
             .bind(&co.destination_chain)
-            .bind(&co.source_asset)
-            .bind(&co.destination_asset)
-            .bind(&co.initiator_source_address)
-            .bind(&co.initiator_destination_address)
+            .bind(normalize_address(&co.source_asset, is_source_bitcoin))
+            .bind(normalize_address(
+                &co.destination_asset,
+                is_destination_bitcoin,
+            ))
+            .bind(normalize_address(
+                &co.initiator_source_address,
+                is_source_bitcoin,
+            ))
+            .bind(normalize_address(
+                &co.initiator_destination_address,
+                is_destination_bitcoin,
+            ))
             .bind(&co.source_amount)
             .bind(&co.destination_amount)
             .bind(&co.fee)
@@ -1014,7 +958,6 @@ impl Orderbook for OrderbookProvider {
             .bind(&co.secret_hash)
             .bind(&co.user_id)
             .bind(&affiliate_fees_json)
-            .bind(&co.solver_id)
             .bind(&additional_data_json)
             .execute(&mut *tx)
             .await?;
@@ -1047,52 +990,18 @@ impl Orderbook for OrderbookProvider {
 
         tx.commit().await?;
         Ok(())
-    }).await;
-
-        match result {
-            Ok(res) => res,
-            Err(_) => Err(OrderbookError::InternalError(
-                "Transaction timeout".to_string(),
-            )),
-        }
     }
-}
-
-/// Strategy for matching tx hashes in queries, tried in order from fastest to broadest.
-#[derive(Clone, Copy)]
-enum TxHashMatchMode {
-    /// `LOWER(col) = hash` — uses indexes directly
-    Exact,
-    /// `LOWER(col) LIKE 'hash%'` — index-friendly, matches Bitcoin `hash:block_number` format
-    Prefix,
-    /// `LOWER(col) LIKE '%hash%'` — full scan fallback for comma-separated multi-hash values
-    Contains,
-}
-
-impl TxHashMatchMode {
-    const PHASES: [TxHashMatchMode; 3] = [
-        TxHashMatchMode::Exact,
-        TxHashMatchMode::Prefix,
-        TxHashMatchMode::Contains,
-    ];
 }
 
 trait OrderbookQueryBuilder<'a> {
     fn add_where_clause(&mut self);
     fn add_address_filter(&mut self, address: &'a str);
-    fn add_from_owner_filter(&mut self, addresses: &HashSet<String>);
-    fn add_to_owner_filter(&mut self, addresses: &HashSet<String>);
-    fn add_tx_hash_filter(&mut self, tx_hash: &'a str, mode: TxHashMatchMode);
+    fn add_from_owner_filter(&mut self, address: &'a str);
+    fn add_to_owner_filter(&mut self, address: &'a str);
+    fn add_tx_hash_filter(&mut self, tx_hash: &'a str);
     fn add_time_range_filter(&mut self, start_time: Option<DateTime<Utc>>, end_time: DateTime<Utc>);
     fn add_chain_filter(&mut self, column: &'a str, chain: &'a str);
     fn add_statuses_filter(&mut self, status: &HashSet<OrderStatusVerbose>);
-    fn add_solver_id_filter(&mut self, solver_ids: &HashSet<String>);
-    fn add_integrator_filter(&mut self, integrator: &HashSet<String>);
-    fn apply_order_filters(
-        &mut self,
-        filters: &'a OrderQueryFilters,
-        tx_hash_mode: TxHashMatchMode,
-    );
 }
 
 impl<'a> OrderbookQueryBuilder<'a> for QueryBuilder<'a, Postgres> {
@@ -1123,77 +1032,36 @@ impl<'a> OrderbookQueryBuilder<'a> for QueryBuilder<'a, Postgres> {
         self.push("))");
     }
 
-    fn add_from_owner_filter(&mut self, addresses: &HashSet<String>) {
-        let lowercased_addresses = addresses
-            .iter()
-            .map(|address| address.to_lowercase())
-            .collect::<Vec<String>>();
-
+    fn add_from_owner_filter(&mut self, address: &'a str) {
+        let lower_address = address.to_lowercase();
         self.add_where_clause();
-        self.push("LOWER(co.initiator_source_address) = ANY(");
-        self.push_bind(lowercased_addresses);
-        self.push(")");
+        self.push("LOWER(co.initiator_source_address) = ");
+        self.push_bind(lower_address);
     }
 
-    fn add_to_owner_filter(&mut self, addresses: &HashSet<String>) {
-        let lowercased_addresses = addresses
-            .iter()
-            .map(|address| address.to_lowercase())
-            .collect::<Vec<String>>();
+    fn add_to_owner_filter(&mut self, address: &'a str) {
+        let lower_address = address.to_lowercase();
         self.add_where_clause();
-        self.push("LOWER(co.initiator_destination_address) = ANY(");
-        self.push_bind(lowercased_addresses);
-        self.push(")");
+        self.push("LOWER(co.initiator_destination_address) = ");
+        self.push_bind(lower_address);
     }
 
-    fn add_solver_id_filter(&mut self, solver_ids: &HashSet<String>) {
-        let lowercased_solver_ids = solver_ids
-            .iter()
-            .map(|solver_id| solver_id.to_lowercase())
-            .collect::<Vec<String>>();
-        self.add_where_clause();
-        self.push("LOWER(co.solver_id) = ANY(");
-        self.push_bind(lowercased_solver_ids);
-        self.push(")");
-    }
-
-    fn add_integrator_filter(&mut self, integrator: &HashSet<String>) {
-        let lower_integrator = integrator
-            .iter()
-            .map(|integrator| integrator.to_lowercase())
-            .collect::<Vec<String>>();
-        self.add_where_clause();
-        self.push("LOWER(COALESCE(co.additional_data->>'integrator', 'Garden')) = ANY(");
-        self.push_bind(lower_integrator);
-        self.push(")");
-    }
-
-    fn add_tx_hash_filter(&mut self, tx_hash: &'a str, mode: TxHashMatchMode) {
-        let lowered = tx_hash.to_lowercase();
-        let (operator, pattern) = match mode {
-            TxHashMatchMode::Exact => ("=", lowered),
-            TxHashMatchMode::Prefix => ("LIKE", format!("{}%", lowered)),
-            TxHashMatchMode::Contains => ("LIKE", format!("%{}%", lowered)),
-        };
-
-        const TX_HASH_COLUMNS: [&str; 6] = [
-            "ss1.initiate_tx_hash",
-            "ss2.initiate_tx_hash",
-            "ss1.refund_tx_hash",
-            "ss2.refund_tx_hash",
-            "ss1.redeem_tx_hash",
-            "ss2.redeem_tx_hash",
-        ];
-
+    fn add_tx_hash_filter(&mut self, tx_hash: &'a str) {
+        let pattern = format!("%{}%", tx_hash.to_lowercase());
         self.add_where_clause();
         self.push("(");
-        for (i, col) in TX_HASH_COLUMNS.iter().enumerate() {
-            if i > 0 {
-                self.push(" OR ");
-            }
-            self.push(format!("LOWER({}) {} ", col, operator));
-            self.push_bind(pattern.clone());
-        }
+        self.push("LOWER(ss1.initiate_tx_hash) LIKE ");
+        self.push_bind(pattern.clone());
+        self.push(" OR LOWER(ss2.initiate_tx_hash) LIKE ");
+        self.push_bind(pattern.clone());
+        self.push(" OR LOWER(ss1.refund_tx_hash) LIKE ");
+        self.push_bind(pattern.clone());
+        self.push(" OR LOWER(ss2.refund_tx_hash) LIKE ");
+        self.push_bind(pattern.clone());
+        self.push(" OR LOWER(ss1.redeem_tx_hash) LIKE ");
+        self.push_bind(pattern.clone());
+        self.push(" OR LOWER(ss2.redeem_tx_hash) LIKE ");
+        self.push_bind(pattern.clone());
         self.push(")");
     }
 
@@ -1217,15 +1085,11 @@ impl<'a> OrderbookQueryBuilder<'a> for QueryBuilder<'a, Postgres> {
 
     fn add_statuses_filter(&mut self, statuses: &HashSet<OrderStatusVerbose>) {
         let not_initiated = "(co.additional_data->>'deadline')::bigint > EXTRACT(EPOCH FROM NOW())::bigint AND ss1.initiate_tx_hash = ''";
-        let in_progress = "ss1.initiate_tx_hash != ''
-            AND ss1.redeem_tx_hash = ''
-            AND ss1.refund_tx_hash = ''";
+        let in_progress =
+            "ss1.initiate_block_number > 0 AND (co.additional_data->>'deadline')::bigint > EXTRACT(EPOCH FROM ss1.initiate_timestamp)::bigint AND ss1.redeem_tx_hash = '' AND ss1.refund_tx_hash = ''";
         let completed = "ss1.redeem_tx_hash <> '' OR ss1.refund_tx_hash <> ''";
         let expired = "(co.additional_data->>'deadline')::bigint < EXTRACT(EPOCH FROM NOW())::bigint AND ss1.initiate_tx_hash = ''";
         let refunded = "ss1.refund_tx_hash <> ''";
-
-        // Hack: Display all orders except those which are not initiated by LI.FI, Phantom and are not expired
-        let display = "(ss1.initiate_tx_hash != '')  OR  (COALESCE(co.additional_data->>'integrator', '') NOT IN ('LI.FI', 'phantom') AND (co.additional_data->>'deadline')::bigint >= EXTRACT(EPOCH FROM NOW())::bigint)";
 
         self.add_where_clause();
         self.push("("); // <-- open group
@@ -1240,7 +1104,6 @@ impl<'a> OrderbookQueryBuilder<'a> for QueryBuilder<'a, Postgres> {
                 OrderStatusVerbose::Completed => completed,
                 OrderStatusVerbose::Expired => expired,
                 OrderStatusVerbose::Refunded => refunded,
-                OrderStatusVerbose::Display => display,
             };
 
             self.push("(");
@@ -1249,45 +1112,2258 @@ impl<'a> OrderbookQueryBuilder<'a> for QueryBuilder<'a, Postgres> {
         }
         self.push(")"); // <-- close group
     }
+}
 
-    fn apply_order_filters(
-        &mut self,
-        filters: &'a OrderQueryFilters,
-        tx_hash_mode: TxHashMatchMode,
-    ) {
-        if let Some(address) = &filters.address {
-            self.add_address_filter(address);
-        } else {
-            if let Some(from) = &filters.from_owner {
-                self.add_from_owner_filter(from);
-            }
-            if let Some(to) = &filters.to_owner {
-                self.add_to_owner_filter(to);
-            }
+#[cfg(not(feature = "test-utils"))]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        primitives::{AdditionalData, ChainName},
+        test_utils::{
+            create_test_matched_order, default_matched_order, delete_all_matched_orders,
+            delete_matched_order, provider, simulate_test_swap_initiate, simulate_test_swap_redeem,
+            simulate_test_swap_refund, TestMatchedOrderConfig, TestTxData,
+        },
+    };
+    use alloy::{hex, primitives::Address};
+    use serial_test::serial;
+    use std::str::FromStr;
+    use utils::Hashable;
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_solver_committed_funds() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+
+        let filler_address = format!("bcrt1q{}", hex::encode(&rand::random::<[u8; 20]>()));
+        let order_config = TestMatchedOrderConfig {
+            destination_chain_initiator_address: filler_address,
+            ..Default::default()
+        };
+
+        let order = create_test_matched_order(&provider.pool, order_config)
+            .await
+            .unwrap();
+        let amount = provider
+            .get_solver_committed_funds(
+                &order.destination_swap.initiator,
+                &order.destination_swap.chain,
+                &order.destination_swap.asset,
+            )
+            .await
+            .unwrap();
+        assert_eq!(amount, BigDecimal::from(0));
+
+        // Simulate swap initiate for the source swap
+        simulate_test_swap_initiate(&provider.pool, &order.source_swap.swap_id, None)
+            .await
+            .unwrap();
+
+        let updated_amount = provider
+            .get_solver_committed_funds(
+                &order.destination_swap.initiator,
+                &order.destination_swap.chain,
+                &order.destination_swap.asset,
+            )
+            .await
+            .unwrap();
+
+        println!("new committed amount {:#?}", updated_amount);
+        assert_eq!(
+            updated_amount.cmp(&order.destination_swap.amount),
+            std::cmp::Ordering::Equal
+        );
+
+        delete_matched_order(&provider.pool, &order.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_secret_hash_exists() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+
+        let secret: String = (0..32)
+            .map(|_| format!("{:02x}", rand::random::<u8>()))
+            .collect();
+
+        let secret_hash = secret.sha256().unwrap();
+
+        let is_exists = provider.exists(&secret_hash.to_string()).await.unwrap();
+
+        // checking for the secret hash before creating any order.
+        assert!(!is_exists);
+
+        let order_config = TestMatchedOrderConfig {
+            ..Default::default()
+        };
+        let order = create_test_matched_order(&provider.pool, order_config)
+            .await
+            .unwrap();
+
+        let ss_swap_exists = provider
+            .exists(&order.source_swap.secret_hash)
+            .await
+            .unwrap();
+        let ds_swap_exists = provider
+            .exists(&order.destination_swap.secret_hash)
+            .await
+            .unwrap();
+
+        // checking for the secret hash after creating an order.
+        assert!(ss_swap_exists);
+        assert!(ds_swap_exists);
+
+        delete_matched_order(&provider.pool, &order.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_all_matched_orders() {
+        let provider = provider().await;
+
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+        let mut created_orders = Vec::new();
+        let num_orders = 5;
+
+        for _ in 0..num_orders {
+            let order_config = TestMatchedOrderConfig {
+                ..Default::default()
+            };
+            let order = create_test_matched_order(&provider.pool, order_config)
+                .await
+                .unwrap();
+            created_orders.push(order);
         }
 
-        if let Some(tx_hash) = &filters.tx_hash {
-            self.add_tx_hash_filter(tx_hash, tx_hash_mode);
+        let matched_orders = provider
+            .get_all_matched_orders(OrderQueryFilters::default())
+            .await
+            .unwrap();
+
+        // Verify that all matched orders exist in the retrieved list
+        let created_ids: Vec<_> = created_orders
+            .iter()
+            .map(|o| &o.create_order.create_id)
+            .collect();
+        let fetched_ids: Vec<_> = matched_orders
+            .data
+            .iter()
+            .map(|o| &o.create_order.create_id)
+            .collect();
+        for id in &created_ids {
+            assert!(
+                fetched_ids.contains(id),
+                "Order with ID {} was not found!",
+                id
+            );
         }
 
-        if let Some(from_chain) = &filters.from_chain {
-            self.add_chain_filter("ss1.chain", from_chain.as_ref());
+        for order in created_orders {
+            delete_matched_order(&provider.pool, &order.create_order.create_id)
+                .await
+                .unwrap();
         }
+    }
 
-        if let Some(to_chain) = &filters.to_chain {
-            self.add_chain_filter("ss2.chain", to_chain.as_ref());
-        }
+    #[tokio::test]
+    #[serial]
+    async fn test_get_all_matched_orders_with_filters() {
+        let provider = provider().await;
 
-        if let Some(statuses) = &filters.status {
-            self.add_statuses_filter(statuses);
-        }
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+        let address = format!(
+            "0x{}",
+            alloy::primitives::hex::encode(alloy_primitives::Address::random())
+        );
 
-        if let Some(solver_id) = &filters.solver_id {
-            self.add_solver_id_filter(solver_id);
-        }
+        let order_config1 = TestMatchedOrderConfig {
+            initiator_source_address: address.clone(),
+            source_chain: "arbitrum_sepolia".to_string(),
+            ..Default::default()
+        };
+        let order1 = create_test_matched_order(&provider.pool, order_config1)
+            .await
+            .unwrap();
+        let order_config2 = TestMatchedOrderConfig::default();
+        let order2 = create_test_matched_order(&provider.pool, order_config2)
+            .await
+            .unwrap();
 
-        if let Some(integrator) = &filters.integrator {
-            self.add_integrator_filter(integrator);
-        }
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    Some(address.clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(matched_orders.data.len(), 1);
+        assert_eq!(
+            matched_orders.data[0].create_order.create_id,
+            order1.create_order.create_id
+        );
+
+        // Should find all orders when no chain filters are provided
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(1, 10, None, None, None, None, None, None, None).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 2);
+
+        // Should find orders with only source chain filter
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    Some(ChainName::new("arbitrum_sepolia")),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    Some(ChainName::new("bitcoin_regtest")),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+
+        // Should return empty orders
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    Some(ChainName::new("starknet_sepolia")),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 0);
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    Some(ChainName::new("arbitrum_sepolia")),
+                    Some(ChainName::new("bitcoin_regtest")),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 0);
+
+        // Should find orders with only destination chain filter
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    Some(ChainName::new("ethereum_localnet")),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 2);
+
+        // Should find orders with both source and destination chain filters
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    Some(ChainName::new("arbitrum_sepolia")),
+                    Some(ChainName::new("ethereum_localnet")),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    Some(ChainName::new("bitcoin_regtest")),
+                    Some(ChainName::new("ethereum_localnet")),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+
+        delete_matched_order(&provider.pool, &order1.create_order.create_id)
+            .await
+            .unwrap();
+        delete_matched_order(&provider.pool, &order2.create_order.create_id)
+            .await
+            .unwrap();
+
+        let order_config3 = TestMatchedOrderConfig::default();
+        let order3 = create_test_matched_order(&provider.pool, order_config3)
+            .await
+            .unwrap();
+
+        let tx_hash = "0x1234567890123456789012345678901234567890";
+        let user_id = "user_id".to_string();
+
+        simulate_test_swap_initiate(
+            &provider.pool,
+            &order3.source_swap.swap_id,
+            Some(TestTxData {
+                tx_hash: tx_hash.to_string(),
+                block_number: 132,
+                filled_amount: BigDecimal::from(10000),
+                current_confirmations: 3,
+                timestamp: chrono::Utc::now(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    Some(tx_hash.to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(matched_orders.data.len(), 1);
+        assert_eq!(
+            matched_orders.data[0]
+                .source_swap
+                .initiate_tx_hash
+                .to_string(),
+            tx_hash
+        );
+
+        delete_matched_order(&provider.pool, &order3.create_order.create_id)
+            .await
+            .unwrap();
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    Some("invalid_tx_hash".to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        // should return empty list as no orders match the invalid tx hash
+        assert_eq!(matched_orders.data.len(), 0);
+
+        let order_config4 = TestMatchedOrderConfig {
+            initiator_source_address: address.clone(),
+            ..Default::default()
+        };
+        let order4 = create_test_matched_order(&provider.pool, order_config4)
+            .await
+            .unwrap();
+        let tx_hash = "0xabcdef1234567890abcdef1234567890abcdef12";
+
+        simulate_test_swap_initiate(
+            &provider.pool,
+            &order4.source_swap.swap_id,
+            Some(TestTxData {
+                tx_hash: tx_hash.to_string(),
+                block_number: 133,
+                filled_amount: BigDecimal::from(10000),
+                current_confirmations: 3,
+                timestamp: chrono::Utc::now(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Should find no orders when address matches but tx_hash doesn't
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    Some(address.clone()),
+                    Some("invalid_tx".to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 0);
+
+        // Should find no orders when address doesn't match
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    Some("invalid_address".to_string()),
+                    Some(tx_hash.to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 0);
+
+        // Should find the order with both matching address and tx_hash
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    Some(address.clone()),
+                    Some(tx_hash.to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+        assert_eq!(
+            matched_orders.data[0].create_order.create_id,
+            order4.create_order.create_id
+        );
+
+        // should find order with both lowercase and uppercase address
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    Some(address.clone().to_uppercase()),
+                    Some(tx_hash.to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+        assert_eq!(
+            matched_orders.data[0].create_order.create_id,
+            order4.create_order.create_id
+        );
+
+        // should find order with both lowercase and uppercase tx_hash
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    Some(address.clone()),
+                    Some(tx_hash.to_uppercase()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+        assert_eq!(
+            matched_orders.data[0].create_order.create_id,
+            order4.create_order.create_id
+        );
+
+        // Clean up
+        delete_matched_order(&provider.pool, &order4.create_order.create_id)
+            .await
+            .unwrap();
+
+        // should handle btc tx hashes
+        let order_config5 = TestMatchedOrderConfig {
+            destination_chain_initiator_address: address.clone(),
+            user_id: user_id.clone(),
+            ..Default::default()
+        };
+        let order5 = create_test_matched_order(&provider.pool, order_config5)
+            .await
+            .unwrap();
+        let btc_tx_hash = "1f7b872dfa5ab3dd814c69f10b502178f94f55f1ee4125e0f202cc4229c7a27c:898618,0x1234567890123456789012345678901234567890:100";
+        simulate_test_swap_initiate(
+            &provider.pool,
+            &order5.destination_swap.swap_id,
+            Some(TestTxData {
+                tx_hash: btc_tx_hash.to_string(),
+                block_number: 133,
+                filled_amount: BigDecimal::from(10000),
+                current_confirmations: 3,
+                timestamp: chrono::Utc::now(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    Some(address.clone()),
+                    Some(
+                        "1f7b872dfa5ab3dd814c69f10b502178f94f55f1ee4125e0f202cc4229c7a27c"
+                            .to_string(),
+                    ),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+        assert_eq!(
+            matched_orders.data[0].create_order.create_id,
+            order5.create_order.create_id
+        );
+
+        // Should find order with user_id
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    Some(user_id.clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+        assert_eq!(
+            matched_orders.data[0].create_order.user_id.clone().unwrap(),
+            user_id
+        );
+
+        delete_matched_order(&provider.pool, &order5.create_order.create_id)
+            .await
+            .unwrap();
+
+        // should filter orders by status filters
+        let order_config6 = TestMatchedOrderConfig::default();
+        let order6 = create_test_matched_order(&provider.pool, order_config6)
+            .await
+            .unwrap();
+
+        //should return initiated orders
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::NotInitiated])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+        assert_eq!(
+            matched_orders.data[0].create_order.create_id,
+            order6.create_order.create_id
+        );
+
+        let tx_hash = "0x1264567890126456789012645678901264567890";
+        simulate_test_swap_initiate(
+            &provider.pool,
+            &order6.source_swap.swap_id,
+            Some(TestTxData {
+                tx_hash: tx_hash.to_string(),
+                block_number: 162,
+                filled_amount: BigDecimal::from(10000),
+                current_confirmations: 6,
+                timestamp: chrono::Utc::now(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        //should return initiated orders
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::InProgress])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+        assert_eq!(
+            matched_orders.data[0].create_order.create_id,
+            order6.create_order.create_id
+        );
+
+        //simulate redeem
+        let now = chrono::Utc::now();
+        provider
+            .update_swap_redeem(
+                &order6.source_swap.swap_id,
+                "0x1234567890123456789012345678901234567890",
+                &order6.source_swap.secret_hash,
+                162,
+                now,
+            )
+            .await
+            .unwrap();
+        //should return completed orders
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::Completed])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+        assert_eq!(
+            matched_orders.data[0].create_order.create_id,
+            order6.create_order.create_id
+        );
+
+        //should return expired orders
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::Expired])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 0);
+
+        // create a matched_order but update additional_data to make it expired
+        let order_config7 = TestMatchedOrderConfig {
+            ..Default::default()
+        };
+        let mut order7 = create_test_matched_order(&provider.pool, order_config7)
+            .await
+            .unwrap();
+        // delete existing matched_order
+        delete_matched_order(&provider.pool, &order7.create_order.create_id)
+            .await
+            .unwrap();
+        let deadline = order7.create_order.additional_data.deadline - (24 * 60 * 60);
+        order7.create_order.additional_data = AdditionalData {
+            strategy_id: order7.create_order.additional_data.strategy_id,
+            bitcoin_optional_recipient: order7
+                .create_order
+                .additional_data
+                .bitcoin_optional_recipient,
+            input_token_price: order7.create_order.additional_data.input_token_price,
+            output_token_price: order7.create_order.additional_data.output_token_price,
+            sig: order7.create_order.additional_data.sig,
+            deadline,
+            instant_refund_tx_bytes: order7.create_order.additional_data.instant_refund_tx_bytes,
+            redeem_tx_bytes: order7.create_order.additional_data.redeem_tx_bytes,
+            tx_hash: order7.create_order.additional_data.tx_hash,
+            is_blacklisted: order7.create_order.additional_data.is_blacklisted,
+            integrator: order7.create_order.additional_data.integrator,
+            version: order7.create_order.additional_data.version,
+            bitcoin: None,
+            source_delegator: None,
+        };
+        provider.create_matched_order(&order7).await.unwrap();
+        //should return expired orders
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::Expired])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+        assert_eq!(
+            matched_orders.data[0].create_order.create_id,
+            order7.create_order.create_id
+        );
+
+        //simulate initiate
+        simulate_test_swap_initiate(&provider.pool, &order7.source_swap.swap_id, None)
+            .await
+            .unwrap();
+
+        //should return refunded orders
+        simulate_test_swap_refund(&provider.pool, &order7.source_swap.swap_id, None)
+            .await
+            .unwrap();
+
+        //should return refunded orders
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::Refunded])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+        assert_eq!(
+            matched_orders.data[0].create_order.create_id,
+            order7.create_order.create_id
+        );
+
+        // should filter orders by status filters
+        let order_config8 = TestMatchedOrderConfig::default();
+        let order8 = create_test_matched_order(&provider.pool, order_config8)
+            .await
+            .unwrap();
+
+        //should return initiated orders
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([
+                        OrderStatusVerbose::NotInitiated,
+                        OrderStatusVerbose::Refunded,
+                    ])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 2);
+
+        assert!(matched_orders
+            .data
+            .iter()
+            .map(|order| order.create_order.create_id == order8.create_order.create_id,)
+            .any(|x| x));
+
+        assert!(matched_orders
+            .data
+            .iter()
+            .map(|order| order.create_order.create_id == order7.create_order.create_id)
+            .any(|x| x));
+
+        // Clean up
+        delete_matched_order(&provider.pool, &order6.create_order.create_id)
+            .await
+            .unwrap();
+
+        let order_config9 = TestMatchedOrderConfig {
+            initiator_source_address: address.clone(),
+            initiator_destination_address: Address::ZERO.to_string(),
+            ..Default::default()
+        };
+        let _ = create_test_matched_order(&provider.pool, order_config9)
+            .await
+            .unwrap();
+
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(address.clone()),
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matched_orders
+            .data
+            .iter()
+            .map(|order| order.create_order.initiator_source_address == address.to_string())
+            .all(|x| x));
+        assert!(matched_orders
+            .data
+            .iter()
+            .map(|order| order.create_order.initiator_destination_address
+                == Address::ZERO.to_string())
+            .all(|x| x));
+
+        let matched_orders = provider
+            .get_all_matched_orders(
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(Address::ZERO.to_string()),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matched_orders
+            .data
+            .iter()
+            .map(|order| order.create_order.initiator_source_address == address.to_string())
+            .all(|x| x));
+        assert!(matched_orders
+            .data
+            .iter()
+            .map(|order| order.create_order.initiator_destination_address
+                == Address::ZERO.to_string())
+            .all(|x| x));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_matched_order() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+        let order_config = TestMatchedOrderConfig {
+            ..Default::default()
+        };
+        let order = create_test_matched_order(&provider.pool, order_config)
+            .await
+            .unwrap();
+
+        let matched_order = provider
+            .get_matched_order(&order.create_order.create_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            matched_order.unwrap().create_order.create_id,
+            order.create_order.create_id
+        );
+
+        delete_matched_order(&provider.pool, &order.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_matched_orders() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+        let address = format!(
+            "0x{}",
+            alloy::primitives::hex::encode(alloy_primitives::Address::random())
+        );
+        let now = chrono::Utc::now();
+
+        let order_config = TestMatchedOrderConfig {
+            initiator_source_address: address.clone(),
+            ..Default::default()
+        };
+        let order = create_test_matched_order(&provider.pool, order_config.clone())
+            .await
+            .unwrap();
+
+        let matched_orders = provider
+            .get_matched_orders(
+                &address,
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::InProgress])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+
+        provider
+            .update_swap_redeem(
+                &order.destination_swap.swap_id,
+                "0x1234567890123456789012345678901234567890",
+                &order.source_swap.secret_hash,
+                132,
+                now,
+            )
+            .await
+            .unwrap();
+
+        let matched_orders = provider
+            .get_matched_orders(
+                &address,
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::Completed])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+
+        delete_matched_order(&provider.pool, &order.create_order.create_id)
+            .await
+            .unwrap();
+
+        let order = create_test_matched_order(&provider.pool, order_config.clone())
+            .await
+            .unwrap();
+
+        provider
+            .update_swap_initiate(
+                &order.source_swap.swap_id,
+                BigDecimal::from_str("100").unwrap(),
+                "0x1234567890123456789012345678901234567890",
+                132,
+                now,
+            )
+            .await
+            .unwrap();
+
+        let matched_orders = provider
+            .get_matched_orders(
+                &address,
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::InProgress])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+
+        provider
+            .update_swap_refund(
+                &order.source_swap.swap_id,
+                "0x1234567890123456789012345678901234567890",
+                132,
+                now,
+            )
+            .await
+            .unwrap();
+
+        let matched_orders = provider
+            .get_matched_orders(
+                &address,
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::Completed])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+
+        let matched_orders = provider
+            .get_matched_orders(
+                "0xjhknm",
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::Completed])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 0);
+
+        let matched_orders = provider
+            .get_matched_orders(
+                &order.create_order.user_id.unwrap(),
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::Completed])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+
+        let matched_orders = provider
+            .get_matched_orders(
+                &address,
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::InProgress])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 0);
+
+        let matched_orders = provider
+            .get_matched_orders(
+                &address,
+                OrderQueryFilters::new(1, 10, None, None, None, None, None, None, None).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+
+        let order2 = create_test_matched_order(&provider.pool, order_config.clone())
+            .await
+            .unwrap();
+
+        let matched_orders = provider
+            .get_matched_orders(
+                &address,
+                OrderQueryFilters::new(1, 10, None, None, None, None, None, None, None).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 2);
+
+        let matched_orders = provider
+            .get_matched_orders(
+                &address,
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::InProgress])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+
+        let matched_orders = provider
+            .get_matched_orders(
+                &address,
+                OrderQueryFilters::new(
+                    1,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(HashSet::from([OrderStatusVerbose::Completed])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched_orders.data.len(), 1);
+
+        delete_matched_order(&provider.pool, &order.create_order.create_id)
+            .await
+            .unwrap();
+        delete_matched_order(&provider.pool, &order2.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_add_instant_refund_sacp() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+
+        let order_config = TestMatchedOrderConfig {
+            ..Default::default()
+        };
+        let order = create_test_matched_order(&provider.pool, order_config)
+            .await
+            .unwrap();
+
+        let instant_refund_sacp  = "02000000000101da620a354b0f3c6ad69dbd1daf4dc370a35d19e8e3433033ffba96f4bd80635d0000000000ffffffff01069b0700000000002251206c3525aba1c7f25c3390abf7565841c8dc8bfab2bb897b1adb3987599f63e3910441e6a0b47cb46944b8a8faacc6239fd8a8d4d7a34487cfed537c78b7ef15a6f51a11bd804cccd239e2bfa1506e404d4926b02598750499de75490773165cef6c258341e6a0b47cb46944b8a8faacc6239fd8a8d4d7a34487cfed537c78b7ef15a6f51a11bd804cccd239e2bfa1506e404d4926b02598750499de75490773165cef6c25834620712d22bac07e92f86bb6923620ceaa9c982d3d625133927cf41f52982e557c1cac20460f2e8ff81fc4e0a8e6ce7796704e3829e3e3eedb8db9390bdc51f4f04cf0a6ba529c61c12160e11a135f94e536a5b222e5d09fd9db1be5f5f5e753920290c0410cf388f005fe144a16b6e02d3f2362c042e4e7c639c21c7d2d46873ecc9309d6213da175b9386dc923e543c71cad95e7344c737eceaa7c5aec3d8b04c6ed0774708d442000000000".to_string();
+        provider
+            .add_instant_refund_sacp(&order.create_order.create_id, &instant_refund_sacp)
+            .await
+            .unwrap();
+
+        let matched_order = provider
+            .get_matched_order(&order.create_order.create_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            matched_order
+                .unwrap()
+                .create_order
+                .additional_data
+                .instant_refund_tx_bytes
+                .unwrap(),
+            instant_refund_sacp
+        );
+
+        println!("Successfully added instant refund sacp");
+
+        delete_matched_order(&provider.pool, &order.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_add_redeem_sacp() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+
+        let order_config = TestMatchedOrderConfig {
+            ..Default::default()
+        };
+        let order = create_test_matched_order(&provider.pool, order_config)
+            .await
+            .unwrap();
+
+        let redeem_sacp = "02000000000101da620a354b0f3c6ad69dbd1daf4dc370a35d19e8e3433033ffba96f4bd80635d0000000000ffffffff01069b0700000000002251206c3525aba1c7f25c3390abf7565841c8dc8bfab2bb897b1adb3987599f63e3910441e6a0b47cb46944b8a8faacc6239fd8a8d4d7a34487cfed537c78b7ef15a6f51a11bd804cccd239e2bfa1506e404d4926b02598750499de75490773165cef6c258341e6a0b47cb46944b8a8faacc6239fd8a8d4d7a34487cfed537c78b7ef15a6f51a11bd804cccd239e2bfa1506e404d4926b02598750499de75490773165cef6c25834620712d22bac07e92f86bb6923620ceaa9c982d3d625133927cf41f52982e557c1cac20460f2e8ff81fc4e0a8e6ce7796704e3829e3e3eedb8db9390bdc51f4f04cf0a6ba529c61c12160e11a135f94e536a5b222e5d09fd9db1be5f5f5e753920290c0410cf388f005fe144a16b6e02d3f2362c042e4e7c639c21c7d2d46873ecc9309d6213da175b9386dc923e543c71cad95e7344c737eceaa7c5aec3d8b04c6ed0774708d442000000000".to_string();
+
+        let redeem_tx_id =
+            "380f681ba8541da5e6e8f256cdd3b564f7030c7b716d9dc37fe7b22136927d42".to_string();
+        // passing secret_hash in place of secret.
+        provider
+            .add_redeem_sacp(
+                &order.create_order.create_id,
+                &redeem_sacp,
+                &redeem_tx_id,
+                &order.source_swap.secret_hash,
+            )
+            .await
+            .unwrap();
+
+        let matched_order = provider
+            .get_matched_order(&order.create_order.create_id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            matched_order
+                .unwrap()
+                .create_order
+                .additional_data
+                .redeem_tx_bytes
+                .unwrap(),
+            redeem_sacp
+        );
+
+        println!("Successfully added redeem sacp");
+
+        delete_matched_order(&provider.pool, &order.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_pending_orders() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+
+        let filler = "bcd6f4cfa96358c74dbc03fec5ba25da66bbc92a31b714ce339dd93db1a9ffac";
+
+        let source_chain_id = "bitcoin_regtest";
+        let destination_chain_id = "ethereum_localnet";
+
+        let order_config = TestMatchedOrderConfig {
+            destination_chain_initiator_address: filler.to_string(),
+            ..Default::default()
+        };
+        let order = create_test_matched_order(&provider.pool, order_config.clone())
+            .await
+            .unwrap();
+
+        // Chain as destination: check for initiation test.
+        simulate_test_swap_initiate(&provider.pool, &order.source_swap.swap_id, None)
+            .await
+            .unwrap();
+        let pending_orders = provider
+            .get_filler_pending_orders(destination_chain_id, filler)
+            .await
+            .unwrap();
+        assert!(pending_orders
+            .iter()
+            .any(|o| o.create_order.create_id == order.create_order.create_id));
+
+        delete_matched_order(&provider.pool, &order.create_order.create_id)
+            .await
+            .unwrap();
+
+        // Chain as source : check for redeem.
+        let order = create_test_matched_order(&provider.pool, order_config.clone())
+            .await
+            .unwrap();
+        simulate_test_swap_initiate(&provider.pool, &order.source_swap.swap_id, None)
+            .await
+            .unwrap();
+        simulate_test_swap_initiate(&provider.pool, &order.destination_swap.swap_id, None)
+            .await
+            .unwrap();
+        // note : here we are simulating the redeem for the destination swap and placing secret hash in place of secret.
+        simulate_test_swap_redeem(
+            &provider.pool,
+            &order.destination_swap.swap_id,
+            &order.source_swap.secret_hash,
+            None,
+        )
+        .await
+        .unwrap();
+        let pending_orders = provider
+            .get_filler_pending_orders(source_chain_id, filler)
+            .await
+            .unwrap();
+        assert!(pending_orders
+            .iter()
+            .any(|o| o.create_order.create_id == order.create_order.create_id));
+
+        delete_matched_order(&provider.pool, &order.create_order.create_id)
+            .await
+            .unwrap();
+
+        // Refund case for either chain
+        let order = create_test_matched_order(&provider.pool, order_config.clone())
+            .await
+            .unwrap();
+
+        simulate_test_swap_initiate(&provider.pool, &order.source_swap.swap_id, None)
+            .await
+            .unwrap();
+        simulate_test_swap_initiate(&provider.pool, &order.destination_swap.swap_id, None)
+            .await
+            .unwrap();
+
+        let pending_orders = provider
+            .get_filler_pending_orders(source_chain_id, filler)
+            .await
+            .unwrap();
+        assert!(pending_orders
+            .iter()
+            .any(|o| o.create_order.create_id == order.create_order.create_id));
+
+        delete_matched_order(&provider.pool, &order.create_order.create_id)
+            .await
+            .unwrap();
+
+        // Instant refund case when source chain matches
+        let order = create_test_matched_order(&provider.pool, order_config.clone())
+            .await
+            .unwrap();
+
+        simulate_test_swap_initiate(&provider.pool, &order.source_swap.swap_id, None)
+            .await
+            .unwrap();
+
+        let pending_orders = provider
+            .get_filler_pending_orders(source_chain_id, filler)
+            .await
+            .unwrap();
+
+        assert!(pending_orders
+            .iter()
+            .any(|o| o.create_order.create_id == order.create_order.create_id));
+
+        delete_matched_order(&provider.pool, &order.create_order.create_id)
+            .await
+            .unwrap();
+
+        let order = create_test_matched_order(&provider.pool, order_config.clone())
+            .await
+            .unwrap();
+        simulate_test_swap_initiate(&provider.pool, &order.source_swap.swap_id, None)
+            .await
+            .unwrap();
+        simulate_test_swap_initiate(&provider.pool, &order.destination_swap.swap_id, None)
+            .await
+            .unwrap();
+        simulate_test_swap_refund(&provider.pool, &order.destination_swap.swap_id, None)
+            .await
+            .unwrap();
+        let pending_orders = provider
+            .get_filler_pending_orders(source_chain_id, filler)
+            .await
+            .unwrap();
+        assert!(pending_orders
+            .iter()
+            .any(|o| o.create_order.create_id == order.create_order.create_id));
+
+        delete_matched_order(&provider.pool, &order.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_solver_pending_orders() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+
+        let order_config1 = TestMatchedOrderConfig {
+            source_chain: "starknet_devnet".to_string(),
+            destination_chain: "bitcoin_regtest".to_string(),
+            ..Default::default()
+        };
+        let order1 = create_test_matched_order(&provider.pool, order_config1)
+            .await
+            .unwrap();
+
+        // Simulate swap initiate for the source swap on Order 1
+        // This makes Order 1 pending for destination initiate
+        simulate_test_swap_initiate(&provider.pool, &order1.source_swap.swap_id, None)
+            .await
+            .unwrap();
+
+        let pending_orders = provider.get_solver_pending_orders().await.unwrap();
+        assert_eq!(pending_orders.len(), 1);
+        assert!(pending_orders
+            .iter()
+            .any(|o| o.create_order.create_id == order1.create_order.create_id));
+
+        let order_config2 = TestMatchedOrderConfig {
+            source_chain: "arbitrum_localnet".to_string(),
+            destination_chain: "bitcoin_regtest".to_string(),
+            ..Default::default()
+        };
+        let order2 = create_test_matched_order(&provider.pool, order_config2)
+            .await
+            .unwrap();
+
+        // Simulate swap initiate for the source swap on Order 2
+        // This makes Order 2 pending for destination initiate
+        simulate_test_swap_initiate(&provider.pool, &order2.source_swap.swap_id, None)
+            .await
+            .unwrap();
+
+        let pending_orders = provider.get_solver_pending_orders().await.unwrap();
+        assert_eq!(pending_orders.len(), 2);
+        assert!(pending_orders
+            .iter()
+            .any(|o| o.create_order.create_id == order2.create_order.create_id));
+
+        // Simulate swap initiate for the destination swap on Order 2
+        // Also simulate redeems on both swaps on Order 2
+        // This makes order 2 complete
+        simulate_test_swap_initiate(&provider.pool, &order2.destination_swap.swap_id, None)
+            .await
+            .unwrap();
+        simulate_test_swap_redeem(
+            &provider.pool,
+            &order2.destination_swap.swap_id,
+            &order2.source_swap.secret_hash,
+            None,
+        )
+        .await
+        .unwrap();
+        simulate_test_swap_redeem(
+            &provider.pool,
+            &order2.source_swap.swap_id,
+            &order2.destination_swap.secret_hash,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let pending_orders = provider.get_solver_pending_orders().await.unwrap();
+        assert_eq!(pending_orders.len(), 1);
+        assert!(pending_orders
+            .iter()
+            .any(|o| o.create_order.create_id == order1.create_order.create_id));
+
+        // Simulate refund on source swap on Order 1
+        // This makes order 1 complete and not pending
+        simulate_test_swap_refund(&provider.pool, &order1.source_swap.swap_id, None)
+            .await
+            .unwrap();
+
+        let pending_orders = provider.get_solver_pending_orders().await.unwrap();
+        assert_eq!(pending_orders.len(), 0);
+
+        delete_matched_order(&provider.pool, &order1.create_order.create_id)
+            .await
+            .unwrap();
+        delete_matched_order(&provider.pool, &order2.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_update_swap_initiate() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+
+        let now = chrono::Utc::now();
+
+        let order_config = TestMatchedOrderConfig {
+            ..Default::default()
+        };
+        let order = create_test_matched_order(&provider.pool, order_config)
+            .await
+            .unwrap();
+
+        provider
+            .update_swap_initiate(
+                &order.source_swap.swap_id,
+                BigDecimal::from_str("100").unwrap(),
+                "0x1234567890123456789012345678901234567890",
+                132,
+                now,
+            )
+            .await
+            .unwrap();
+
+        let order = provider
+            .get_matched_order(&order.create_order.create_id)
+            .await
+            .unwrap();
+
+        let matched_order = order.unwrap();
+
+        assert_eq!(
+            matched_order.source_swap.filled_amount,
+            BigDecimal::from_str("100").unwrap()
+        );
+        assert_eq!(
+            matched_order.source_swap.initiate_tx_hash.to_string(),
+            "0x1234567890123456789012345678901234567890".to_string()
+        );
+        assert_eq!(
+            matched_order.source_swap.initiate_block_number.unwrap(),
+            BigDecimal::from_str("132").unwrap()
+        );
+        assert_eq!(matched_order.source_swap.initiate_timestamp.unwrap(), now);
+
+        delete_matched_order(&provider.pool, &matched_order.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_update_swap_redeem() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+
+        let now = chrono::Utc::now();
+
+        let order_config = TestMatchedOrderConfig {
+            ..Default::default()
+        };
+        let order = create_test_matched_order(&provider.pool, order_config)
+            .await
+            .unwrap();
+
+        let secret_hash = order.source_swap.secret_hash;
+
+        // passing secret_hash in place of secret.
+        provider
+            .update_swap_redeem(
+                &order.source_swap.swap_id,
+                "0x1234567890123456789012345678901234567890",
+                &secret_hash,
+                132,
+                now,
+            )
+            .await
+            .unwrap();
+
+        let order = provider
+            .get_matched_order(&order.create_order.create_id)
+            .await
+            .unwrap();
+
+        let matched_order = order.unwrap();
+
+        assert_eq!(matched_order.source_swap.secret_hash, secret_hash);
+        assert_eq!(
+            matched_order.source_swap.redeem_tx_hash.to_string(),
+            "0x1234567890123456789012345678901234567890".to_string()
+        );
+        assert_eq!(
+            matched_order.source_swap.redeem_block_number.unwrap(),
+            BigDecimal::from_str("132").unwrap()
+        );
+        assert_eq!(matched_order.source_swap.redeem_timestamp.unwrap(), now);
+
+        delete_matched_order(&provider.pool, &matched_order.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_update_swap_refund() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+
+        let now = chrono::Utc::now();
+
+        let order_config = TestMatchedOrderConfig {
+            ..Default::default()
+        };
+        let order = create_test_matched_order(&provider.pool, order_config)
+            .await
+            .unwrap();
+
+        provider
+            .update_swap_refund(
+                &order.source_swap.swap_id,
+                "0x1234567890123456789012345678901234567890",
+                132,
+                now,
+            )
+            .await
+            .unwrap();
+
+        let order = provider
+            .get_matched_order(&order.create_order.create_id)
+            .await
+            .unwrap();
+
+        let matched_order = order.unwrap();
+
+        assert_eq!(
+            matched_order.source_swap.refund_tx_hash.to_string(),
+            "0x1234567890123456789012345678901234567890".to_string()
+        );
+        assert_eq!(
+            matched_order.source_swap.refund_block_number.unwrap(),
+            BigDecimal::from_str("132").unwrap()
+        );
+        assert_eq!(matched_order.source_swap.refund_timestamp.unwrap(), now);
+
+        delete_matched_order(&provider.pool, &matched_order.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_update_confirmations() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+
+        let order_config = TestMatchedOrderConfig {
+            ..Default::default()
+        };
+        let order = create_test_matched_order(&provider.pool, order_config)
+            .await
+            .unwrap();
+
+        simulate_test_swap_initiate(
+            &provider.pool,
+            &order.source_swap.swap_id,
+            Some(TestTxData {
+                tx_hash: "0x1234567890123456789012345678901234567890".to_string(),
+                block_number: 132,
+                filled_amount: BigDecimal::from(10000),
+                current_confirmations: 0,
+                timestamp: chrono::Utc::now(),
+            }),
+        )
+        .await
+        .unwrap();
+        provider
+            .update_confirmations(&order.source_swap.chain, 133)
+            .await
+            .unwrap();
+
+        let order = provider
+            .get_matched_order(&order.create_order.create_id)
+            .await
+            .unwrap();
+
+        let matched_order = order.unwrap();
+
+        assert_eq!(matched_order.source_swap.current_confirmations, 2);
+
+        delete_matched_order(&provider.pool, &matched_order.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_volume() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+        let mut asset_decimals = HashMap::new();
+
+        asset_decimals.insert(("bitcoin_regtest".to_string(), "primary".to_string()), 8);
+        asset_decimals.insert(
+            (
+                "ethereum_localnet".to_string(),
+                "0x0165878A594ca255338adfa4d48449f69242Eb8F"
+                    .to_string()
+                    .to_lowercase(),
+            ),
+            8,
+        );
+
+        // Create test orders with known amounts and prices
+        let order_config1 = TestMatchedOrderConfig {
+            source_amount: BigDecimal::from(1000000000000i64),
+            destination_amount: BigDecimal::from(500000000000i64),
+            ..Default::default()
+        };
+
+        let order1 = create_test_matched_order(&provider.pool, order_config1)
+            .await
+            .unwrap();
+        simulate_test_swap_redeem(
+            &provider.pool,
+            &order1.source_swap.swap_id,
+            &order1.destination_swap.secret_hash,
+            None,
+        )
+        .await
+        .unwrap();
+        simulate_test_swap_redeem(
+            &provider.pool,
+            &order1.destination_swap.swap_id,
+            &order1.source_swap.secret_hash,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Test 1: Get all volume
+        let volume = provider
+            .get_volume(
+                StatsQueryFilters {
+                    source_chain: None,
+                    destination_chain: None,
+                    address: None,
+                    from: None,
+                    to: None,
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(volume, BigDecimal::from(15000));
+
+        // Test 2: Get volume for specific chain
+        let volume = provider
+            .get_volume(
+                StatsQueryFilters {
+                    source_chain: None,
+                    destination_chain: Some("ethereum_localnet".to_string()),
+                    address: None,
+                    from: None,
+                    to: None,
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(volume, BigDecimal::from(5000));
+
+        // sleep for a second to ensure different timestamps
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        // Test 3: Get volume with time interval
+        let now = Utc::now().timestamp();
+        let volume = provider
+            .get_volume(
+                StatsQueryFilters {
+                    source_chain: None,
+                    destination_chain: None,
+                    address: None,
+                    from: None,
+                    to: Some(now),
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(volume, BigDecimal::from(15000));
+
+        // Test 4 : Get volume for source and destination chain
+        let volume = provider
+            .get_volume(
+                StatsQueryFilters {
+                    source_chain: Some("arbitrum_localnet".to_string()),
+                    destination_chain: Some("ethereum_localnet".to_string()),
+                    address: None,
+                    from: None,
+                    to: Some(now),
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(volume, BigDecimal::from(0));
+
+        let volume = provider
+            .get_volume(
+                StatsQueryFilters {
+                    source_chain: Some("bitcoin_regtest".to_string()),
+                    destination_chain: Some("ethereum_localnet".to_string()),
+                    address: None,
+                    from: None,
+                    to: Some(now),
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(volume, BigDecimal::from(15000));
+
+        // Test 5 : Get volume for with from time interval
+        let volume = provider
+            .get_volume(
+                StatsQueryFilters {
+                    source_chain: None,
+                    destination_chain: None,
+                    address: None,
+                    from: Some(now),
+                    to: None,
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(volume, BigDecimal::from(0));
+
+        let volume = provider
+            .get_volume(
+                StatsQueryFilters {
+                    source_chain: None,
+                    destination_chain: None,
+                    address: None,
+                    from: Some(order1.create_order.created_at.timestamp()),
+                    to: None,
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(volume, BigDecimal::from(15000));
+
+        // Test 6 : Get volume based on the given address
+        let volume = provider
+            .get_volume(
+                StatsQueryFilters {
+                    source_chain: Some("bitcoin_regtest".to_string()),
+                    destination_chain: None,
+                    address: Some(order1.source_swap.initiator.to_string()),
+                    from: None,
+                    to: None,
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(volume, BigDecimal::from(10000));
+
+        let volume = provider
+            .get_volume(
+                StatsQueryFilters {
+                    source_chain: None,
+                    destination_chain: None,
+                    address: Some("0x0000000000000000000000000000000000000000".to_string()),
+                    from: None,
+                    to: None,
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(volume, BigDecimal::from(0));
+
+        // Test 7 : Get volume for all filters
+        let volume = provider
+            .get_volume(
+                StatsQueryFilters {
+                    source_chain: Some("bitcoin_regtest".to_string()),
+                    destination_chain: Some("ethereum_localnet".to_string()),
+                    address: Some(order1.destination_swap.redeemer.to_string()),
+                    from: Some(order1.create_order.created_at.timestamp()),
+                    to: Some(now),
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(volume, BigDecimal::from(15000));
+
+        // Clean up
+        delete_matched_order(&provider.pool, &order1.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_fees() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+        let mut asset_decimals = HashMap::new();
+
+        // Setup test data with known decimals
+        asset_decimals.insert(("bitcoin_regtest".to_string(), "primary".to_string()), 8);
+        asset_decimals.insert(
+            (
+                "ethereum_localnet".to_string(),
+                "0x0165878A594ca255338adfa4d48449f69242Eb8F"
+                    .to_string()
+                    .to_lowercase(),
+            ),
+            8,
+        );
+
+        // Create test orders with known
+        let order_config1 = TestMatchedOrderConfig {
+            source_amount: BigDecimal::from(1000000000000i64),
+            destination_amount: BigDecimal::from(500000000000i64),
+            ..Default::default()
+        };
+
+        let order1 = create_test_matched_order(&provider.pool, order_config1)
+            .await
+            .unwrap();
+        simulate_test_swap_redeem(
+            &provider.pool,
+            &order1.source_swap.swap_id,
+            &order1.destination_swap.secret_hash,
+            None,
+        )
+        .await
+        .unwrap();
+        simulate_test_swap_redeem(
+            &provider.pool,
+            &order1.destination_swap.swap_id,
+            &order1.source_swap.secret_hash,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let fees = provider
+            .get_fees(
+                StatsQueryFilters {
+                    source_chain: None,
+                    destination_chain: None,
+                    address: None,
+                    from: None,
+                    to: None,
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fees, BigDecimal::from(5000));
+
+        // Create another order to test fees calculation
+        let order_config2 = TestMatchedOrderConfig {
+            source_amount: BigDecimal::from(1000000000000i64),
+            destination_amount: BigDecimal::from(500000000000i64),
+            ..Default::default()
+        };
+
+        let order2 = create_test_matched_order(&provider.pool, order_config2)
+            .await
+            .unwrap();
+        simulate_test_swap_redeem(
+            &provider.pool,
+            &order2.source_swap.swap_id,
+            &order2.destination_swap.secret_hash,
+            None,
+        )
+        .await
+        .unwrap();
+        simulate_test_swap_redeem(
+            &provider.pool,
+            &order2.destination_swap.swap_id,
+            &order2.source_swap.secret_hash,
+            None,
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        // Test 2: Get all fees (should now include $5000 from second order)
+        let fees = provider
+            .get_fees(
+                StatsQueryFilters {
+                    source_chain: None,
+                    destination_chain: None,
+                    address: None,
+                    from: None,
+                    to: None,
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fees, BigDecimal::from(10000));
+
+        // Test 3: Get fees for specific chain
+        let fees = provider
+            .get_fees(
+                StatsQueryFilters {
+                    source_chain: Some("ethereum_localnet".to_string()),
+                    destination_chain: None,
+                    address: None,
+                    from: None,
+                    to: None,
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fees, BigDecimal::from(0));
+
+        let fees = provider
+            .get_fees(
+                StatsQueryFilters {
+                    source_chain: Some("bitcoin_regtest".to_string()),
+                    destination_chain: None,
+                    address: None,
+                    from: None,
+                    to: None,
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fees, BigDecimal::from(10000));
+
+        // Test 4 : Get fees for given address
+        let fees = provider
+            .get_fees(
+                StatsQueryFilters {
+                    source_chain: None,
+                    destination_chain: None,
+                    address: Some(order1.destination_swap.redeemer.to_string()),
+                    from: None,
+                    to: None,
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fees, BigDecimal::from(5000));
+
+        let fees = provider
+            .get_fees(
+                StatsQueryFilters {
+                    source_chain: None,
+                    destination_chain: None,
+                    address: Some("0x0000000000000000000000000000000000000000".to_string()),
+                    from: None,
+                    to: None,
+                },
+                &asset_decimals,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fees, BigDecimal::from(0));
+
+        // Clean up
+        delete_matched_order(&provider.pool, &order1.create_order.create_id)
+            .await
+            .unwrap();
+        delete_matched_order(&provider.pool, &order2.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_create_matched_order() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+        let mut order = default_matched_order();
+        order.source_swap.htlc_address = Some("source_swap_htlc_address".to_string());
+        order.destination_swap.htlc_address = Some("destination_swap_htlc_address".to_string());
+        order.source_swap.token_address = Some("destination_swap_htlc_address".to_string());
+        order.destination_swap.token_address = Some("destination_swap_token_address".to_string());
+        provider.create_matched_order(&order).await.unwrap();
+
+        let matched_order = provider
+            .get_matched_order(&order.create_order.create_id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            matched_order.create_order.create_id,
+            order.create_order.create_id
+        );
+        let res = provider.create_matched_order(&order).await;
+        assert!(res.is_err());
+        assert!(matches!(
+            res.err(),
+            Some(OrderbookError::OrderAlreadyExists(_))
+        ));
+
+        let matched_order = provider
+            .get_matched_order(&order.create_order.create_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            matched_order.create_order.create_id,
+            order.create_order.create_id
+        );
+        assert_eq!(
+            order.source_swap.htlc_address,
+            matched_order.source_swap.htlc_address
+        );
+        assert_eq!(
+            order.destination_swap.htlc_address,
+            matched_order.destination_swap.htlc_address
+        );
+        assert_eq!(
+            order.source_swap.token_address,
+            matched_order.source_swap.token_address
+        );
+        assert_eq!(
+            order.destination_swap.token_address,
+            matched_order.destination_swap.token_address
+        );
+
+        delete_matched_order(&provider.pool, &matched_order.create_order.create_id)
+            .await
+            .unwrap();
     }
 }

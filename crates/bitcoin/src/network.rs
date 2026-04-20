@@ -1,10 +1,12 @@
-use super::{
-    ALPEN_MAINNET, ALPEN_REGTEST, ALPEN_SIGNET, BITCOIN_MAINNET, BITCOIN_REGTEST, BITCOIN_TESTNET,
-};
 use bitcoin::{Address, Network};
 use eyre::{eyre, Context, Result};
 use orderbook::primitives::MatchedOrderVerbose;
 use std::str::FromStr;
+
+/// Supported Bitcoin networks
+const BITCOIN_MAINNET: &str = "bitcoin";
+const BITCOIN_TESTNET: &str = "bitcoin_testnet";
+const BITCOIN_REGTEST: &str = "bitcoin_regtest";
 
 /// Get the Bitcoin network for this swap
 ///
@@ -75,67 +77,45 @@ pub fn get_bitcoin_recipient_address(order: &MatchedOrderVerbose) -> Result<Addr
     validate_btc_address_for_network(&recipient_str, network)
 }
 
-/// Enum to represent Alpen networks
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AlpenNetwork {
-    Mainnet,
-    Testnet,
-    Regtest,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::Network;
+    use eyre::Result;
 
-impl AlpenNetwork {
-    pub fn to_bitcoin_network(self) -> Network {
-        match self {
-            AlpenNetwork::Mainnet => Network::Bitcoin,
-            AlpenNetwork::Testnet => Network::Testnet,
-            AlpenNetwork::Regtest => Network::Regtest,
-        }
+    #[test]
+    fn test_get_bitcoin_network() -> Result<()> {
+        let bitcoin = get_bitcoin_network("bitcoin")?;
+        let bitcoin_testnet = get_bitcoin_network("bitcoin_testnet")?;
+        let bitcoin_regtest = get_bitcoin_network("bitcoin_regtest")?;
+        let invalid_network = get_bitcoin_network("ethereum");
+
+        assert!(invalid_network.is_err());
+        assert_eq!(bitcoin.to_core_arg(), "main");
+        assert_eq!(bitcoin_testnet.to_core_arg(), "test");
+        assert_eq!(bitcoin_regtest.to_core_arg(), "regtest");
+
+        Ok(())
     }
-}
 
-/// Get the Alpen network from a string identifier
-///
-/// # Arguments
-/// * `chain` - The chain identifier string: "alpen", "alpen_testnet", or "alpen_regtest"
-///
-/// # Returns
-/// * `Ok(AlpenNetwork)` for valid identifiers
-/// * `Err` otherwise
-pub fn get_alpen_network(chain: &str) -> Result<AlpenNetwork> {
-    match chain.to_lowercase().as_str() {
-        ALPEN_MAINNET => Ok(AlpenNetwork::Mainnet),
-        ALPEN_SIGNET => Ok(AlpenNetwork::Testnet),
-        ALPEN_REGTEST => Ok(AlpenNetwork::Regtest),
-        _ => Err(eyre::eyre!(
-            "Expected one of the following Alpen networks: {}, {}, {}",
-            ALPEN_MAINNET,
-            ALPEN_SIGNET,
-            ALPEN_REGTEST
-        )),
-    }
-}
+    #[tokio::test]
+    async fn test_validate_btc_address_for_network() {
+        // Valid address for Mainnet
+        let addr = "bc1plunh8ysxvzt6emdsuj2uwth79zem0ye78annc0lqacwzjs28e0tsp5tpdv";
+        let network = Network::Bitcoin;
+        assert!(validate_btc_address_for_network(addr, network).is_ok());
 
-/// Validates an Alpen address for a specific network.
-///
-/// # Arguments
-/// * `addr` - The address to validate
-/// * `network` - The Alpen network (Mainnet, Testnet, etc.)
-///
-/// # Returns
-/// * `Ok(Address)` with the validated address
-/// * `Err` if the address is invalid or doesn't match the network
-pub fn validate_alpen_address_for_network(addr: &str, network: AlpenNetwork) -> Result<Address> {
-    let bitcoin_network = network.to_bitcoin_network();
-    let address = Address::from_str(addr)
-        .with_context(|| format!("Invalid Alpen address format: {}", addr))?;
+        // Invalid address format
+        let invalid_addr = "invalid_address";
+        assert!(validate_btc_address_for_network(invalid_addr, network).is_err());
 
-    if address.is_valid_for_network(bitcoin_network) {
-        Ok(address.assume_checked())
-    } else {
-        Err(eyre::eyre!(
-            "Address {} is not valid for Alpen network {:?}",
-            addr,
-            network
-        ))
+        // Valid address but wrong network
+        let testnet_addr = "tb1plunh8ysxvzt6emdsuj2uwth79zem0ye78annc0lqacwzjs28e0tskuawhr";
+        let mainnet_network = Network::Bitcoin;
+        assert!(validate_btc_address_for_network(testnet_addr, mainnet_network).is_err());
+
+        // Valid address for Testnet
+        let network_testnet = Network::Testnet;
+        assert!(validate_btc_address_for_network(testnet_addr, network_testnet).is_ok());
     }
 }

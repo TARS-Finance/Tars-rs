@@ -1,13 +1,17 @@
 use api::primitives::{Response, Status};
-use axum::response::IntoResponse;
 use reqwest::StatusCode;
+use axum::{response::IntoResponse};
 
+// Errors that can occur when interacting with Relay's
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
+    /// Error response returned by the API
     #[error("{0}")]
     Api(String, StatusCode),
+    /// Request failed
     #[error("{0}")]
     Request(String, StatusCode),
+    /// Failed to parse URL or JSON
     #[error("{0}")]
     ParseError(String),
 }
@@ -33,10 +37,13 @@ impl From<url::ParseError> for RelayError {
 impl IntoResponse for RelayError {
     fn into_response(self) -> axum::response::Response {
         match self {
-            RelayError::Api(msg, status) | RelayError::Request(msg, status) => {
+            RelayError::Api(msg, status) |
+            RelayError::Request(msg, status) => {
                 (status, msg).into_response()
             }
-            RelayError::ParseError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
+            RelayError::ParseError(msg) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+            }
         }
     }
 }

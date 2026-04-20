@@ -271,6 +271,340 @@ pub fn validate_hash_generation_params(
         }
     }
 
-    let _ = network;
-    Ok(())
+    // Validate network compatibility (you might want to add specific network checks)
+    match network {
+        Network::Bitcoin
+        | Network::Testnet
+        | Network::Signet
+        | Network::Regtest
+        | Network::Testnet4 => Ok(()),
+        _ => bail!("Invalid network"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        fund_btc, get_htlc_address,
+        htlc::{
+            htlc::get_control_block,
+            tx::{create_inputs_from_utxos, create_outputs, get_output_values},
+        },
+        instant_refund_leaf,
+        test_utils::{
+            generate_bitcoin_random_keypair, get_test_bitcoin_indexer, TEST_AMOUNT, TEST_NETWORK,
+        },
+        HTLCLeaf, UtxoStatus,
+    };
+    use bitcoin::{
+        absolute::LockTime, consensus::serialize, key::Keypair, transaction::Version, Amount,
+        ScriptBuf, Sequence, Txid, Witness,
+    };
+    use std::str::FromStr;
+
+    #[tokio::test]
+    async fn test_validate_schnorr_signature() {
+        let secp = Secp256k1::new();
+
+        let key_pair = generate_bitcoin_random_keypair();
+
+        let initiator_pubkey = key_pair.x_only_public_key().0;
+
+        // Random message hash for testing.
+        let message_hash =
+            hex::decode("a2bd5d6e85cdcfb0461022a87d7f9b7020555ed98c1ef3c49212f87a671eb7ec")
+                .unwrap();
+
+        let message = Message::from_digest_slice(&message_hash).unwrap();
+
+        let sig = secp.sign_schnorr_no_aux_rand(&message, &key_pair);
+
+        // Test with valid data
+        assert!(validate_schnorr_signature(
+            &initiator_pubkey,
+            &sig.serialize(),
+            &message_hash,
+            TapSighashType::Default
+        )
+        .is_ok());
+
+        // Test with invalid data
+        let invalid_message_hash =
+            hex::decode("a2bd5d6e85cdcfb0461022a87d7f9b7020555ed98c1ef3c49212f87a671eb7ef")
+                .unwrap();
+
+        assert!(validate_schnorr_signature(
+            &initiator_pubkey,
+            &sig.serialize(),
+            &invalid_message_hash,
+            TapSighashType::Default
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_validate_utxos() {
+        // Test empty UTXOs
+        let empty_utxos: Vec<Utxo> = vec![];
+        let result = validate_utxos(&empty_utxos);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No UTXOs provided"),
+            "Expected error about empty UTXO set"
+        );
+
+        // Test zero value UTXO
+        let zero_value_utxos = vec![Utxo {
+            txid: Txid::hash(&[1u8; 32]),
+            vout: 0,
+            value: 0,
+            status: UtxoStatus {
+                confirmed: true,
+                block_height: Some(100),
+            },
+        }];
+        let result = validate_utxos(&zero_value_utxos);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("zero value"),
+            "Expected error about zero value UTXO"
+        );
+
+        // Test valid UTXOs
+        let valid_utxos = vec![
+            Utxo {
+                txid: Txid::hash(&[1u8; 32]),
+                vout: 0,
+                value: 100_000,
+                status: UtxoStatus {
+                    confirmed: true,
+                    block_height: Some(100),
+                },
+            },
+            Utxo {
+                txid: Txid::hash(&[2u8; 32]),
+                vout: 1,
+                value: 200_000,
+                status: UtxoStatus {
+                    confirmed: true,
+                    block_height: Some(100),
+                },
+            },
+            Utxo {
+                txid: Txid::hash(&[0u8; 32]),
+                vout: 2,
+                value: 150_000,
+                status: UtxoStatus {
+                    confirmed: true,
+                    block_height: Some(100),
+                },
+            },
+        ];
+
+        assert!(
+            validate_utxos(&valid_utxos).is_ok(),
+            "Expected validation to succeed with valid UTXOs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_instant_refund_sacp_tx() -> Result<()> {
+        // Setup test environment with regtest network
+        let network = Network::Regtest;
+        let secret_hash_str = "c2da702654a5f5b14d5a969bd489da62282b7fdf12b0e8e13be5f110222b60c6";
+
+        let indexer = get_test_bitcoin_indexer()?;
+
+        let secp = Secp256k1::new();
+
+        // Generate keypairs for initiator and redeemer
+        let initiator_keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let initiator_pubkey = initiator_keypair.x_only_public_key().0;
+
+        let redeemer_keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let redeemer_pubkey = redeemer_keypair.x_only_public_key().0;
+
+        let mut secret_hash = [0u8; 32];
+
+        // Ensure the string is exactly 32 bytes (or adjust the length).
+        secret_hash.copy_from_slice(&secret_hash_str.as_bytes()[0..32]);
+
+        // Create HTLC parameters for the test
+        let htlc_params = HTLCParams {
+            initiator_pubkey: initiator_pubkey.clone(),
+            redeemer_pubkey: redeemer_pubkey.clone(),
+            amount: 50000,
+            secret_hash: secret_hash.clone(),
+            timelock: 144,
+        };
+
+        let htlc_address = get_htlc_address(&htlc_params, network)?;
+        let recipient = Address::from_str("bcrt1q8v8k050rrn2ggtxk3j57rwz2fnzvsttqy65vnr")?
+            .require_network(network)?;
+
+        // Fund the HTLC address with test BTC
+        fund_btc(&htlc_address, &indexer).await?;
+
+        let utxos = indexer.get_utxos(&htlc_address).await?;
+
+        let initiate_tx_hash = utxos[0].txid.to_string();
+
+        // Generate hashes that need to be signed for the instant refund transaction
+        let hashes = generate_instant_refund_hash(&htlc_params, &utxos, &recipient, network, None)?;
+
+        let mut initiator_signatures = Vec::new();
+        let mut redeemer_signatures = Vec::new();
+
+        // Create Schnorr signatures for each hash using both keypairs
+        for hash in hashes {
+            let msg = Message::from_digest_slice(&hash)?;
+
+            let initiator_signature = bitcoin::taproot::Signature {
+                sighash_type: TapSighashType::SinglePlusAnyoneCanPay,
+                signature: secp.sign_schnorr_no_aux_rand(&msg, &initiator_keypair),
+            };
+            let redeemer_signature = bitcoin::taproot::Signature {
+                sighash_type: TapSighashType::SinglePlusAnyoneCanPay,
+                signature: secp.sign_schnorr_no_aux_rand(&msg, &redeemer_keypair),
+            };
+
+            initiator_signatures.push(initiator_signature);
+            redeemer_signatures.push(redeemer_signature);
+        }
+
+        // Build the instant refund transaction
+        let inputs = create_inputs_from_utxos(&utxos, &Witness::new(), Sequence::MAX);
+        let output_values = get_output_values(&utxos, TapSighashType::SinglePlusAnyoneCanPay)?;
+        let outputs = create_outputs(output_values, &recipient, None)?;
+
+        let instant_refund_leaf_hash =
+            instant_refund_leaf(&initiator_pubkey, &redeemer_pubkey).tapscript_leaf_hash();
+        let control_block_serialized =
+            get_control_block(&htlc_params, HTLCLeaf::InstantRefund)?.serialize();
+
+        let mut instant_refund_sacp = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: inputs.clone(),
+            output: outputs.clone(),
+        };
+
+        // Add witness data with valid initiator signatures
+        for (i, input) in instant_refund_sacp.input.iter_mut().enumerate() {
+            let mut witness = Witness::new();
+            witness.push(initiator_signatures[i].serialize());
+            witness.push(initiator_signatures[i].serialize());
+            witness.push(instant_refund_leaf_hash.clone());
+            witness.push(control_block_serialized.clone());
+
+            input.witness = witness;
+        }
+
+        let instant_refund_tx_bytes = hex::encode(serialize(&instant_refund_sacp));
+
+        // Test 1: Verify transaction with valid initiator signatures (should pass)
+        let result = validate_instant_refund_sacp_tx(
+            &instant_refund_tx_bytes,
+            &initiate_tx_hash,
+            &htlc_params,
+            &utxos,
+            &recipient,
+            network,
+        );
+
+        assert!(result.is_ok());
+
+        // Test 2: Verify transaction with invalid redeemer signatures (should fail)
+        let mut instant_refund_sacp = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: inputs,
+            output: outputs,
+        };
+
+        for (i, input) in instant_refund_sacp.input.iter_mut().enumerate() {
+            let mut witness = Witness::new();
+            witness.push(redeemer_signatures[i].serialize());
+            witness.push(redeemer_signatures[i].serialize());
+            witness.push(instant_refund_leaf_hash.clone());
+            witness.push(control_block_serialized.clone());
+
+            input.witness = witness;
+        }
+
+        let instant_refund_tx_bytes = hex::encode(serialize(&instant_refund_sacp));
+
+        let result = validate_instant_refund_sacp_tx(
+            &instant_refund_tx_bytes,
+            &initiate_tx_hash,
+            &htlc_params,
+            &utxos,
+            &recipient,
+            network,
+        );
+
+        assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_tx() -> Result<()> {
+        // Create a simple test transaction
+        let input_txid = Txid::hash(&[1u8; 32]);
+        let recipient =
+            Address::from_str("bcrt1plzgfycjjpt4s4c6w3etgmfv6zmnc4yd6kvnwjl79vuxs4uzgchmqk4t4gh")?
+                .require_network(TEST_NETWORK)?;
+
+        // Create a transaction with one input and one output
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: input_txid,
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: Amount::from_sat(TEST_AMOUNT),
+                script_pubkey: recipient.script_pubkey(),
+            }],
+        };
+
+        let tx_bytes = serialize(&tx);
+
+        // Test valid transaction
+        let result = validate_tx(&tx_bytes, &input_txid.to_string(), &recipient);
+        assert!(result.is_ok(), "Valid transaction should pass validation");
+
+        // Test invalid input transaction hash
+        let invalid_input_txid = Txid::hash(&[2u8; 32]);
+        let result = validate_tx(&tx_bytes, &invalid_input_txid.to_string(), &recipient);
+        assert!(
+            result.is_err(),
+            "Transaction with invalid input should fail validation"
+        );
+        assert!(result.unwrap_err().to_string().contains("invalid inputs"));
+
+        // Test invalid recipient
+        let different_recipient =
+            Address::from_str("bcrt1pj58evdvnqn9s8xyrryy2nlvscjc9mvavxf5ffwy0thx3j6pca6fq26d3vd")?
+                .require_network(TEST_NETWORK)?;
+        let result = validate_tx(&tx_bytes, &input_txid.to_string(), &different_recipient);
+        assert!(
+            result.is_err(),
+            "Transaction with invalid recipient should fail validation"
+        );
+        assert!(result.unwrap_err().to_string().contains("invalid outputs"));
+
+        Ok(())
+    }
 }

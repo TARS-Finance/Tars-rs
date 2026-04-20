@@ -1,90 +1,110 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 
-pub const SPARK: &str = "spark";
-pub const SPARK_REGTEST: &str = "spark_regtest";
+const STARKNET: &str = "starknet";
+const STARKNET_SEPOLIA: &str = "starknet_sepolia";
+const STARKNET_DEVNET: &str = "starknet_devnet";
 
-pub const LIGHTNING: &str = "lightning";
-pub const LIGHTNING_REGTEST: &str = "lightning_regtest";
+const SOLANA: &str = "solana";
+const SOLANA_TESTNET: &str = "solana_testnet";
+const SOLANA_LOCALNET: &str = "solana_localnet";
 
-pub const STARKNET: &str = "starknet";
-pub const STARKNET_SEPOLIA: &str = "starknet_sepolia";
-pub const STARKNET_DEVNET: &str = "starknet_devnet";
+const BITCOIN: &str = "bitcoin";
+const BITCOIN_TESTNET: &str = "bitcoin_testnet";
+const BITCOIN_REGTEST: &str = "bitcoin_regtest";
 
-pub const SOLANA: &str = "solana";
-pub const SOLANA_TESTNET: &str = "solana_testnet";
-pub const SOLANA_LOCALNET: &str = "solana_localnet";
+const SUI: &str = "sui";
+const SUI_TESTNET: &str = "sui_testnet";
+const SUI_LOCALNET: &str = "sui_localnet";
 
-pub const BITCOIN: &str = "bitcoin";
-pub const BITCOIN_TESTNET: &str = "bitcoin_testnet";
-pub const BITCOIN_REGTEST: &str = "bitcoin_regtest";
-
-pub const SUI: &str = "sui";
-pub const SUI_TESTNET: &str = "sui_testnet";
-pub const SUI_LOCALNET: &str = "sui_localnet";
-
-pub const TRON: &str = "tron";
-pub const TRON_TESTNET: &str = "tron_shasta";
-
-pub const ZCASH: &str = "zcash";
-pub const ZCASH_TESTNET: &str = "zcash_testnet";
-pub const ZCASH_REGTEST: &str = "zcash_regtest";
-
-pub const ALPEN_REGTEST: &str = "alpen_regtest";
-pub const ALPEN_SIGNET: &str = "alpen_signet";
-pub const ALPEN: &str = "alpen";
-
-pub const LITECOIN: &str = "litecoin";
-pub const LITECOIN_TESTNET: &str = "litecoin_testnet";
-pub const LITECOIN_REGTEST: &str = "litecoin_regtest";
-
-pub const XRPL: &str = "xrpl";
-pub const XRPL_TESTNET: &str = "xrpl_testnet";
-pub const XRPL_REGTEST: &str = "xrpl_regtest";
-
+/// Supported blockchain networks in the Garden Ecosystem
+///
+/// This enum represents the different networks that are supported
+/// in the Garden Ecosystem. Each variant corresponds to a specific blockchain
+/// or category of blockchains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChainType {
-    Tron,
     Starknet,
-    XRPL,
+    /// EVM-compatible blockchains (Ethereum, Arbitrum, Base, etc.)
     Evm,
     Solana,
     Bitcoin,
-    Sui,
-    Zcash,
-    Alpen,
-    Litecoin,
-    Spark,
-    Lightning,
+    Sui
 }
 
 impl From<&str> for ChainType {
+    /// Converts a string identifier to a `ChainType` variant
+    ///
+    /// # Arguments
+    ///
+    /// * `chain` - A string representing the blockchain identifier
+    ///
+    /// # Returns
+    ///
+    /// Returns the corresponding `ChainType` variant. If the string
+    /// doesn't match any known chain identifiers, it defaults to `EVM`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use garden_primitives::chains::ChainType;
+    ///
+    /// let chain = ChainType::from("starknet");
+    /// assert!(matches!(chain, ChainType::Starknet));
+    ///
+    /// let chain = ChainType::from("ethereum");
+    /// assert!(matches!(chain, ChainType::EVM));
+    /// ```
     fn from(chain: &str) -> Self {
         match chain {
             STARKNET | STARKNET_SEPOLIA | STARKNET_DEVNET => Self::Starknet,
             SOLANA | SOLANA_TESTNET | SOLANA_LOCALNET => Self::Solana,
             BITCOIN | BITCOIN_TESTNET | BITCOIN_REGTEST => Self::Bitcoin,
             SUI | SUI_TESTNET | SUI_LOCALNET => Self::Sui,
-            TRON | TRON_TESTNET => Self::Tron,
-            ZCASH | ZCASH_TESTNET | ZCASH_REGTEST => Self::Zcash,
-            ALPEN | ALPEN_SIGNET | ALPEN_REGTEST => Self::Alpen,
-            LITECOIN | LITECOIN_TESTNET | LITECOIN_REGTEST => Self::Litecoin,
-            XRPL | XRPL_TESTNET | XRPL_REGTEST => Self::XRPL,
-            SPARK | SPARK_REGTEST => Self::Spark,
-            LIGHTNING | LIGHTNING_REGTEST => Self::Lightning,
             _ => Self::Evm,
         }
     }
 }
 
 impl From<String> for ChainType {
+    /// Converts a `String` identifier to a `ChainType` variant
+    ///
+    /// # Arguments
+    ///
+    /// * `chain` - A `String` representing the blockchain identifier
+    ///
+    /// # Returns
+    ///
+    /// Returns the corresponding `ChainType` variant. If the string
+    /// doesn't match any known chain identifiers, it defaults to `EVM`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use garden_primitives::chains::ChainType;
+    ///
+    /// let chain = ChainType::from("starknet".to_string());
+    /// assert!(matches!(chain, ChainType::Starknet));
+    /// ```
     fn from(chain: String) -> Self {
-        Self::from(chain.to_ascii_lowercase().as_str())
+        Self::from(chain.as_str())
     }
 }
 
 impl Display for ChainType {
+    /// Formats the `ChainType` for display
+    ///
+    /// Returns the debug representation of the chain type as a string.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use garden_primitives::chains::ChainType;
+    ///
+    /// let chain = ChainType::Starknet;
+    /// assert_eq!(chain.to_string(), "Starknet");
+    /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             ChainType::Evm => "evm",
@@ -92,14 +112,7 @@ impl Display for ChainType {
             ChainType::Solana => "solana",
             ChainType::Starknet => "starknet",
             ChainType::Sui => "sui",
-            ChainType::Tron => "tron",
-            ChainType::Zcash => "zcash",
-            ChainType::Alpen => "alpen",
-            ChainType::Litecoin => "litecoin",
-            ChainType::XRPL => "xrpl",
-            ChainType::Spark => "spark",
-            ChainType::Lightning => "lightning",
         };
-        write!(f, "{s}")
+        write!(f, "{}", s)
     }
 }

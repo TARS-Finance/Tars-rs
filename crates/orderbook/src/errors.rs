@@ -30,8 +30,4 @@ pub enum OrderbookError {
     /// Order already exists
     #[error("Order already exists: {0}")]
     OrderAlreadyExists(String),
-
-    /// Error when the database connection pool operation fails
-    #[error("Pool error: {0}")]
-    PoolError(#[from] deadpool::managed::PoolError<sqlx::Error>),
 }
