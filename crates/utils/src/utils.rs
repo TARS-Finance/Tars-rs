@@ -4,6 +4,7 @@ use alloy::{
     hex::FromHex,
     primitives::{Bytes, FixedBytes},
 };
+use base64::Engine;
 
 use aes_gcm::{
     aead::{Aead, Nonce},
@@ -12,6 +13,8 @@ use aes_gcm::{
 use alloy::hex;
 use core::fmt;
 use eyre::{eyre, Result};
+use opentelemetry::KeyValue;
+use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
 use rand::rngs::OsRng;
 use rand::Rng;
 use serde::{
@@ -33,6 +36,7 @@ use tracing::{
     Event, Subscriber,
 };
 use tracing_subscriber::{layer::Context, Layer};
+use url::Url;
 
 /// Trait that provides functionality to convert hexadecimal strings to bytes.
 ///
@@ -366,6 +370,108 @@ impl Visit for FieldVisitor {
         self.fields
             .insert(field.name().to_string(), format!("Error: {}", value));
     }
+}
+
+/// Configuration for OpenTelemetry log export. URL may include Basic Auth credentials.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OtelTracingConfig {
+    /// OTLP endpoint URL (may include `username:password@` for Basic Auth).
+    pub url: String,
+    /// Service name for `service.name` resource attribute.
+    pub service_label: String,
+}
+
+/// Parameters for multi-output tracing: console (always), OpenTelemetry (optional), Discord webhook (optional).
+#[derive(Clone)]
+pub struct TracingParams {
+    /// Service name for logs and webhook notifications.
+    pub service_name: String,
+    /// Minimum log level for console and OpenTelemetry output.
+    pub level: tracing::Level,
+    /// Optional OpenTelemetry export config.
+    pub otel_config: Option<OtelTracingConfig>,
+    /// Optional Discord webhook URL (ERROR events only).
+    pub discord_webhook_url: Option<String>,
+}
+
+/// Sets up tracing with JSON console output, optional OpenTelemetry export, and optional Discord webhook.
+pub fn setup_tracing(params: &TracingParams) -> Result<()> {
+    let level_filter = tracing_subscriber::filter::LevelFilter::from_level(params.level);
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_filter(level_filter);
+
+    let otel_logs_layer = params
+        .otel_config
+        .as_ref()
+        .map(|otel_config| -> Result<_> {
+            let url = Url::parse(&otel_config.url)
+                .map_err(|e| eyre!("Invalid OpenTelemetry URL: {}", e))?;
+            let username = url.username();
+            let password = url.password().unwrap_or_default();
+
+            let endpoint = format!(
+                "{}://{}{}{}",
+                url.scheme(),
+                url.host_str().unwrap_or(""),
+                url.port().map(|p| format!(":{}", p)).unwrap_or_default(),
+                url.path()
+            );
+
+            let exporter = opentelemetry_otlp::LogExporter::builder()
+                .with_http()
+                .with_http_client(reqwest::Client::new())
+                .with_endpoint(endpoint)
+                .with_headers(HashMap::from([(
+                    "Authorization".to_string(),
+                    format!(
+                        "Basic {}",
+                        base64::engine::general_purpose::STANDARD
+                            .encode(format!("{}:{}", username, password))
+                    ),
+                )]))
+                .build()
+                .map_err(|e| eyre!("Failed to build OpenTelemetry log exporter: {}", e))?;
+
+            let logger_provider = opentelemetry_sdk::logs::LoggerProvider::builder()
+                .with_resource(opentelemetry_sdk::Resource::new(vec![
+                    KeyValue::new("service.name", otel_config.service_label.clone()),
+                    KeyValue::new("service_name", otel_config.service_label.clone()),
+                ]))
+                .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+                .build();
+
+            Ok(
+                opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+                    &logger_provider,
+                )
+                .with_filter(level_filter),
+            )
+        })
+        .transpose()?;
+
+    let webhook_layer = params
+        .discord_webhook_url
+        .as_ref()
+        .map(|webhook_url| {
+            WebhookLayer::new(
+                webhook_url,
+                &params.service_name,
+                tracing::Level::ERROR,
+                default_message_formatter,
+            )
+        })
+        .transpose()?;
+
+    use tracing_subscriber::prelude::*;
+
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(otel_logs_layer)
+        .with(webhook_layer)
+        .try_init()
+        .map_err(|e| eyre!("Failed to initialize tracing subscriber: {}", e))
 }
 
 impl<S: Subscriber> Layer<S> for WebhookLayer {

@@ -20,4 +20,9 @@ pub use htlc::{
 pub use indexer::{indexer::*, primitives::*, traits::*};
 pub use merry::*;
 pub use network::*;
+pub use primitives::{
+    BITCOIN as BITCOIN_MAINNET,
+    BITCOIN_REGTEST,
+    BITCOIN_TESTNET,
+};
 pub use relay::*;

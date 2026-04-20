@@ -9,9 +9,9 @@ const SOLANA: &str = "solana";
 const SOLANA_TESTNET: &str = "solana_testnet";
 const SOLANA_LOCALNET: &str = "solana_localnet";
 
-const BITCOIN: &str = "bitcoin";
-const BITCOIN_TESTNET: &str = "bitcoin_testnet";
-const BITCOIN_REGTEST: &str = "bitcoin_regtest";
+pub const BITCOIN: &str = "bitcoin";
+pub const BITCOIN_TESTNET: &str = "bitcoin_testnet";
+pub const BITCOIN_REGTEST: &str = "bitcoin_regtest";
 
 const SUI: &str = "sui";
 const SUI_TESTNET: &str = "sui_testnet";

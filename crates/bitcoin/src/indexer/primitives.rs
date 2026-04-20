@@ -129,6 +129,10 @@ pub struct TxOutput {
     /// The script pubkey of the output
     #[serde(rename = "scriptpubkey")]
     pub script_pubkey: String,
+
+    /// The address derived by the indexer for this script pubkey when available.
+    #[serde(rename = "scriptpubkey_address", default)]
+    pub script_pubkey_address: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
