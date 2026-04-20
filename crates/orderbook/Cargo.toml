@@ -1,0 +1,25 @@
+[package]
+name = "orderbook"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+alloy.workspace = true
+async-trait.workspace = true
+bigdecimal.workspace = true
+chrono.workspace = true
+deadpool.workspace = true
+eyre.workspace = true
+mockall.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+api.workspace = true
+primitives.workspace = true
+utils.workspace = true

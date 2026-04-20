@@ -1,0 +1,71 @@
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[package]
+name = "tars"
+version.workspace = true
+edition.workspace = true
+
+[workspace]
+members = [
+    ".",
+    "crates/api",
+    "crates/bitcoin",
+    "crates/orderbook",
+    "crates/primitives",
+    "crates/quote",
+    "crates/utils",
+]
+resolver = "2"
+
+[features]
+default = []
+api = ["dep:api"]
+bitcoin = ["dep:bitcoin"]
+orderbook = ["dep:orderbook"]
+primitives = ["dep:primitives"]
+quote = ["dep:quote"]
+utils = ["dep:utils"]
+full = ["api", "bitcoin", "orderbook", "primitives", "quote", "utils"]
+
+[dependencies]
+api = { path = "crates/api", optional = true }
+bitcoin = { path = "crates/bitcoin", optional = true }
+orderbook = { path = "crates/orderbook", optional = true }
+primitives = { path = "crates/primitives", optional = true }
+quote = { path = "crates/quote", optional = true }
+utils = { path = "crates/utils", optional = true }
+
+[workspace.dependencies]
+alloy = { version = "1.0.41", features = ["full", "node-bindings", "eip712", "getrandom"] }
+async-trait = "0.1.81"
+axum = "0.7.5"
+bigdecimal = { version = "0.4.0", features = ["serde"] }
+bitcoin_crate = { package = "bitcoin", version = "0.32.4", features = ["rand-std"] }
+chrono = { version = "0.4.38", features = ["serde"] }
+deadpool = { version = "0.12.3", features = ["rt_tokio_1"] }
+eyre = "0.6.12"
+moka = { version = "0.12.8", features = ["future"] }
+mockall = "0.13.0"
+once_cell = "1.21.3"
+rand = "0.8.5"
+reqwest = { version = "0.12.5", features = ["json"] }
+serde = { version = "1.0.223", features = ["derive"] }
+serde_json = { version = "1.0.122", features = ["arbitrary_precision"] }
+sha2 = "0.10.8"
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "tls-native-tls", "postgres", "derive", "macros", "bigdecimal", "chrono", "json"] }
+thiserror = "1.0.63"
+tokio = { version = "1.39.2", features = ["full", "rt-multi-thread"] }
+tower = "0.5.0"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["registry", "json", "env-filter"] }
+url = "2.5.0"
+wiremock = "0.6.3"
+
+api = { path = "crates/api" }
+bitcoin = { path = "crates/bitcoin" }
+orderbook = { path = "crates/orderbook" }
+primitives = { path = "crates/primitives" }
+quote = { path = "crates/quote" }
+utils = { path = "crates/utils" }

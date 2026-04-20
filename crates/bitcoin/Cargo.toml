@@ -1,0 +1,25 @@
+[package]
+name = "bitcoin"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+alloy.workspace = true
+async-trait.workspace = true
+bigdecimal.workspace = true
+bitcoin = { package = "bitcoin", version = "0.32.4", features = ["rand-std"] }
+eyre.workspace = true
+mockall.workspace = true
+once_cell.workspace = true
+orderbook.workspace = true
+primitives.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+utils.workspace = true
