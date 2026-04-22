@@ -15,6 +15,7 @@ members = [
     "crates/evm",
     "crates/fiat",
     "crates/orderbook",
+    "crates/policy",
     "crates/primitives",
     "crates/quote",
     "crates/utils",
@@ -94,6 +95,7 @@ bitcoin = { path = "crates/bitcoin" }
 evm = { path = "crates/evm" }
 fiat = { path = "crates/fiat" }
 orderbook = { path = "crates/orderbook" }
+policy = { path = "crates/policy" }
 primitives = { path = "crates/primitives" }
 quote = { path = "crates/quote" }
 utils = { path = "crates/utils" }
