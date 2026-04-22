@@ -7,6 +7,9 @@ pub use bitcoin;
 #[cfg(feature = "evm")]
 pub use evm;
 
+#[cfg(feature = "fiat")]
+pub use fiat;
+
 #[cfg(feature = "orderbook")]
 pub use orderbook;
 

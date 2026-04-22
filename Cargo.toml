@@ -27,17 +27,19 @@ api = ["dep:api"]
 bitcoin = ["dep:bitcoin"]
 evm = ["dep:evm"]
 evm-test-utils = ["evm", "evm/test-utils"]
+fiat = ["dep:fiat"]
 orderbook = ["dep:orderbook"]
 orderbook-test-utils = ["orderbook", "orderbook/test-utils"]
 primitives = ["dep:primitives"]
 quote = ["dep:quote"]
 utils = ["dep:utils"]
-full = ["api", "bitcoin", "evm", "orderbook", "primitives", "quote", "utils"]
+full = ["api", "bitcoin", "evm", "fiat", "orderbook", "primitives", "quote", "utils"]
 
 [dependencies]
 api = { path = "crates/api", optional = true }
 bitcoin = { path = "crates/bitcoin", optional = true }
 evm = { path = "crates/evm", optional = true }
+fiat = { path = "crates/fiat", optional = true }
 orderbook = { path = "crates/orderbook", optional = true }
 primitives = { path = "crates/primitives", optional = true }
 quote = { path = "crates/quote", optional = true }

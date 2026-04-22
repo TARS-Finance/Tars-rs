@@ -6171,6 +6171,7 @@ dependencies = [
  "api",
  "bitcoin 0.1.0",
  "evm",
+ "fiat",
  "orderbook",
  "primitives",
  "quote 0.1.0",
