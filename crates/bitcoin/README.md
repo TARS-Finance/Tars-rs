@@ -1,6 +1,6 @@
 # Bitcoin
 
-Contains common utilities and helper functions for Bitcoin operations in the garden
+Contains common utilities and helper functions for Bitcoin operations in the unipay
 
 ## Available Functions
 
@@ -146,7 +146,7 @@ Key features:
 Usage example:
 
 ```rust
-use garden::bitcoin::{
+use unipay::bitcoin::{
     batcher::{BitcoinTxBatcher, SpendRequest},
     ArcIndexer, ArcFeeRateEstimator, FeeLevel,
 };
@@ -198,7 +198,7 @@ For detailed type definitions, refer to:
 ## Usage
 
 ```rust
-use garden::bitcoin::{
+use unipay::bitcoin::{
     BitcoinIndexerClient,
     network::{get_bitcoin_network, validate_btc_address_for_network},
     htlc::{get_htlc_address, build_instant_refund_sacp},

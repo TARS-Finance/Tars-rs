@@ -1,4 +1,4 @@
-# Garden Policy
+# uniPay Policy
 
 A flexible, thread-safe policy management library for handling trading rules, fees, and asset pair validation across multiple solvers.
 

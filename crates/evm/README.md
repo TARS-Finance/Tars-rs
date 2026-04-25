@@ -1,10 +1,10 @@
-# Garden EVM
+# uniPay EVM
 
 A Rust library for interacting with EVM-compatible blockchains for atomic swaps using Hash Time Locked Contracts (HTLCs).
 
 ## Overview
 
-The Garden EVM subcrate provides high-level abstractions and utilities for interacting with Ethereum-based blockchains. It focuses on atomic swap functionality through Hash Time Locked Contracts (HTLCs), ERC20 token operations, and transaction batching with multicall support.
+The uniPay EVM subcrate provides high-level abstractions and utilities for interacting with Ethereum-based blockchains. It focuses on atomic swap functionality through Hash Time Locked Contracts (HTLCs), ERC20 token operations, and transaction batching with multicall support.
 
 ## Features
 
@@ -21,19 +21,19 @@ Add the EVM module to your project by enabling the `evm` feature in your `Cargo.
 
 ```toml
 [dependencies]
-garden = { git = "https://github.com/catalogfi/garden.rs", features = ["evm"] }
+unipay = { git = "https://github.com/catalogfi/unipay.rs", features = ["evm"] }
 ```
 
 ## Usage
 
-### Creating a Garden HTLC Instance
+### Creating a uniPay HTLC Instance
 
 ```rust
-use garden::evm::{GardenHTLC, GardenHTLCContract, ERC20Contract, Multicall3Contract};
+use unipay::evm::{uniPayHTLC, uniPayHTLCContract, ERC20Contract, Multicall3Contract};
 use alloy::primitives::{Address, U256};
 use std::str::FromStr;
 
-async fn setup_htlc() -> eyre::Result<GardenHTLC> {
+async fn setup_htlc() -> eyre::Result<uniPayHTLC> {
     // Create contract instances with appropriate addresses
     let htlc_address = Address::from_str("0x...")?;
     let token_address = Address::from_str("0x...")?;
@@ -43,12 +43,12 @@ async fn setup_htlc() -> eyre::Result<GardenHTLC> {
     let provider = // Initialize your provider
     
     // Create contract instances
-    let htlc_contract = GardenHTLCContract::new(htlc_address, provider.clone());
+    let htlc_contract = uniPayHTLCContract::new(htlc_address, provider.clone());
     let erc20_contract = ERC20Contract::new(token_address, provider.clone());
     let multicall_contract = Multicall3Contract::new(multicall_address, provider);
     
     // Create HTLC instance
-    let htlc = GardenHTLC::new(htlc_contract, erc20_contract, multicall_contract);
+    let htlc = uniPayHTLC::new(htlc_contract, erc20_contract, multicall_contract);
     
     Ok(htlc)
 }
@@ -57,11 +57,11 @@ async fn setup_htlc() -> eyre::Result<GardenHTLC> {
 ### Initiating a Swap
 
 ```rust
-use garden::evm::htlc::GardenHTLC;
+use unipay::evm::htlc::uniPayHTLC;
 use orderbook::primitives::EVMSwap;
 use alloy::primitives::{Address, U256, FixedBytes};
 
-async fn create_swap(htlc: &GardenHTLC) -> eyre::Result<String> {
+async fn create_swap(htlc: &uniPayHTLC) -> eyre::Result<String> {
     let swap = EVMSwap {
         redeemer: Address::from_str("0x...")?,
         timelock: 10000, // Block height
@@ -80,10 +80,10 @@ async fn create_swap(htlc: &GardenHTLC) -> eyre::Result<String> {
 ### Redeeming a Swap
 
 ```rust
-use garden::evm::htlc::GardenHTLC;
+use unipay::evm::htlc::uniPayHTLC;
 use alloy::primitives::Bytes;
 
-async fn redeem_swap(htlc: &GardenHTLC, swap: &EVMSwap, secret: Vec<u8>) -> eyre::Result<String> {
+async fn redeem_swap(htlc: &uniPayHTLC, swap: &EVMSwap, secret: Vec<u8>) -> eyre::Result<String> {
     // Convert secret to bytes
     let secret_bytes = Bytes::from(secret);
     
@@ -97,10 +97,10 @@ async fn redeem_swap(htlc: &GardenHTLC, swap: &EVMSwap, secret: Vec<u8>) -> eyre
 ### Using Multicall for Batch Operations
 
 ```rust
-use garden::evm::{htlc::GardenHTLC, primitives::{HTLCRequest, Method}};
+use unipay::evm::{htlc::uniPayHTLC, primitives::{HTLCRequest, Method}};
 use alloy::primitives::Bytes;
 
-async fn batch_operations(htlc: &mut GardenHTLC, swap1: EVMSwap, swap2: EVMSwap, secret: Vec<u8>) -> eyre::Result<String> {
+async fn batch_operations(htlc: &mut uniPayHTLC, swap1: EVMSwap, swap2: EVMSwap, secret: Vec<u8>) -> eyre::Result<String> {
     let requests = vec![
         HTLCRequest {
             method: Method::Initiate { 
@@ -125,7 +125,7 @@ async fn batch_operations(htlc: &mut GardenHTLC, swap1: EVMSwap, swap2: EVMSwap,
 
 ## Core Components
 
-### GardenHTLC
+### uniPayHTLC
 
 The main interface for HTLC operations. It provides methods for:
 
@@ -166,7 +166,7 @@ The module provides a comprehensive error type (`HTLCError`) that covers various
 The module includes test utilities for mocking contracts and simulating blockchain interactions.
 
 ```rust
-use garden::evm::test_utils::ethereum_provider;
+use unipay::evm::test_utils::ethereum_provider;
 
 #[tokio::test]
 async fn test_htlc_operations() {

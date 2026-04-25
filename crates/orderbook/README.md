@@ -1,6 +1,6 @@
 # Orderbook
 
-Contains common data models and helper functions used in the garden
+Contains common data models and helper functions used in the unipay
 
 ## Available Functions
 
@@ -80,7 +80,7 @@ For detailed type definitions, refer to `src/primitives.rs`
 ## Usage
 
 ```rust
-use garden::orderbook::{OrderbookProvider, primitives::{SwapChain, PageData}};
+use unipay::orderbook::{OrderbookProvider, primitives::{SwapChain, PageData}};
 
 #[tokio::main]
 async fn main() -> Result<()> {

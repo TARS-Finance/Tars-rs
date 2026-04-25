@@ -1,6 +1,6 @@
 # Primitives
 
-This crate provides common data types and utility functions used across all crates in the Garden ecosystem.
+This crate provides common data types and utility functions used across all crates in the uniPay ecosystem.
 
 ## Usage
 

@@ -1,10 +1,10 @@
 # Utils
 
-A collection of common utilities for Garden Rust applications.
+A collection of common utilities for uniPay Rust applications.
 
 ## Overview
 
-This utility crate provides reusable components for Garden Rust applications, including:
+This utility crate provides reusable components for uniPay Rust applications, including:
 
 - Hex string to bytes conversion
 - SHA-256 hashing functionality
@@ -14,10 +14,10 @@ This utility crate provides reusable components for Garden Rust applications, in
 
 ## Usage
 
-The `utils` crate is designed to be used as a sub-crate within the Garden package:
+The `utils` crate is designed to be used as a sub-crate within the uniPay package:
 
 ```rust
-use garden::utils::{ToBytes, Hashable, WebhookLayer};
+use unipay::utils::{ToBytes, Hashable, WebhookLayer};
 ```
 
 ## Features
@@ -27,7 +27,7 @@ use garden::utils::{ToBytes, Hashable, WebhookLayer};
 Convert hexadecimal strings to byte arrays using the `ToBytes` trait:
 
 ```rust
-use garden::utils::ToBytes;
+use unipay::utils::ToBytes;
 
 fn example() -> eyre::Result<()> {
     let hex_string = "0xabcdef1234567890";
@@ -42,7 +42,7 @@ fn example() -> eyre::Result<()> {
 Compute SHA-256 hashes using the `Hashable` trait:
 
 ```rust
-use garden::utils::Hashable;
+use unipay::utils::Hashable;
 use alloy::primitives::FixedBytes;
 
 fn example() -> eyre::Result<()> {
@@ -58,7 +58,7 @@ fn example() -> eyre::Result<()> {
 Generate cryptographically secure random secrets:
 
 ```rust
-use garden::utils::gen_secret;
+use unipay::utils::gen_secret;
 
 fn example() {
     let (secret, hash) = gen_secret();
@@ -72,11 +72,11 @@ Use environment variables in your configuration files:
 
 ```rust
 use serde::Deserialize;
-use garden::utils::deserialize_env_field;
+use unipay::utils::deserialize_env_field;
 
 #[derive(Deserialize)]
 struct Config {
-    #[serde(deserialize_with = "garden::utils::deserialize_env_field")]
+    #[serde(deserialize_with = "unipay::utils::deserialize_env_field")]
     api_key: String,
 }
 
@@ -90,14 +90,14 @@ Send log events to a webhook for monitoring:
 
 ```rust
 use tracing::Level;
-use garden::utils::setup_tracing_with_webhook;
+use unipay::utils::setup_tracing_with_webhook;
 
 fn main() -> eyre::Result<()> {
     // Setup tracing with webhook for ERROR level events
     // Limited to 5 messages per minute
     setup_tracing_with_webhook(
         "https://discord.com/api/webhooks/your/webhook/url",
-        "MyGardenApp",
+        "MyuniPayApp",
         Level::ERROR,
         None
     )?;
@@ -114,7 +114,7 @@ fn main() -> eyre::Result<()> {
 You can provide a custom formatter for webhook messages:
 
 ```rust
-use garden::utils::{WebhookLayer, FieldVisitor};
+use unipay::utils::{WebhookLayer, FieldVisitor};
 use tracing::{Event, Level};
 
 let custom_formatter = |event: &Event, visitor: &FieldVisitor, name: &str| {

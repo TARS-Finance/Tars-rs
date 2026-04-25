@@ -1,17 +1,17 @@
 # API
 
-A standardized REST API primitives library for Garden Rust applications.
+A standardized REST API primitives library for uniPay Rust applications.
 
 ## Overview
 
-This crate provides consistent, typed response structures for REST APIs in the Garden ecosystem. It ensures that all API endpoints return responses with a predictable format, making client integration simpler and more reliable.
+This crate provides consistent, typed response structures for REST APIs in the uniPay ecosystem. It ensures that all API endpoints return responses with a predictable format, making client integration simpler and more reliable.
 
 ## Usage
 
-The `api` crate is designed to be used as a sub-crate within the Garden package:
+The `api` crate is designed to be used as a sub-crate within the uniPay package:
 
 ```rust
-use garden::api::primitives::{Response, Status};
+use unipay::api::primitives::{Response, Status};
 ```
 
 ## Features
@@ -21,7 +21,7 @@ use garden::api::primitives::{Response, Status};
 Every API response follows a consistent format with status indication and appropriate result or error fields:
 
 ```rust
-use garden::api::primitives::{Response, Status};
+use unipay::api::primitives::{Response, Status};
 use axum::Json;
 
 // Success response with data
@@ -54,7 +54,7 @@ All responses serialize to JSON with this structure:
 The API primitives integrate seamlessly with the Axum web framework:
 
 ```rust
-use garden::api::primitives::Response;
+use unipay::api::primitives::Response;
 use axum::{Router, routing::get};
 
 async fn get_user(id: String) -> Response<User> {
@@ -73,7 +73,7 @@ let app = Router::new()
 The `Response<T>` type is generic over the result payload type, providing type safety:
 
 ```rust
-use garden::api::primitives::Response;
+use unipay::api::primitives::Response;
 use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize)]
@@ -98,7 +98,7 @@ let profile_response: Response<UserProfile> = get_profile("user123");
 The API primitives make it easy to convert various error types into standardized responses:
 
 ```rust
-use garden::api::primitives::Response;
+use unipay::api::primitives::Response;
 use axum::extract::Path;
 
 async fn handler(Path(id): Path<String>) -> Json<Response<User>> {
