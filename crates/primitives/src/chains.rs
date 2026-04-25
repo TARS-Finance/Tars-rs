@@ -17,10 +17,10 @@ const SUI: &str = "sui";
 const SUI_TESTNET: &str = "sui_testnet";
 const SUI_LOCALNET: &str = "sui_localnet";
 
-/// Supported blockchain networks in the Garden Ecosystem
+/// Supported blockchain networks in the Unipay Ecosystem
 ///
 /// This enum represents the different networks that are supported
-/// in the Garden Ecosystem. Each variant corresponds to a specific blockchain
+/// in the Unipay Ecosystem. Each variant corresponds to a specific blockchain
 /// or category of blockchains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -48,7 +48,7 @@ impl From<&str> for ChainType {
     /// # Examples
     ///
     /// ```
-    /// use garden_primitives::chains::ChainType;
+    /// use unipay_primitives::chains::ChainType;
     ///
     /// let chain = ChainType::from("starknet");
     /// assert!(matches!(chain, ChainType::Starknet));
@@ -82,7 +82,7 @@ impl From<String> for ChainType {
     /// # Examples
     ///
     /// ```
-    /// use garden_primitives::chains::ChainType;
+    /// use unipay_primitives::chains::ChainType;
     ///
     /// let chain = ChainType::from("starknet".to_string());
     /// assert!(matches!(chain, ChainType::Starknet));
@@ -100,7 +100,7 @@ impl Display for ChainType {
     /// # Examples
     ///
     /// ```
-    /// use garden_primitives::chains::ChainType;
+    /// use unipay_primitives::chains::ChainType;
     ///
     /// let chain = ChainType::Starknet;
     /// assert_eq!(chain.to_string(), "Starknet");

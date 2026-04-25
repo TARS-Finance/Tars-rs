@@ -1,4 +1,4 @@
-//! Common utils for garden rust apps
+//! Common utils for unipay rust apps
 
 use alloy::{
     hex::FromHex,

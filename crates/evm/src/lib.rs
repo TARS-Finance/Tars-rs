@@ -18,19 +18,19 @@ use primitives::AlloyProvider;
 
 sol!(
     #[sol(rpc)]
-    GardenHTLC,
+    UnipayHTLC,
     "abi/htlc.json",
 );
 
 sol!(
     #[sol(rpc)]
-    GardenHTLCv2,
+    UnipayHTLCv2,
     "abi/htlcv2.json",
 );
 
 sol!(
     #[sol(rpc)]
-    GardenHTLCv3,
+    UnipayHTLCv3,
     "abi/htlcv3.json",
 );
 
@@ -84,9 +84,9 @@ sol! {
     }
 }
 
-pub type GardenHTLCContract = GardenHTLC::GardenHTLCInstance<AlloyProvider>;
-pub type GardenHTLCv2Contract = GardenHTLCv2::GardenHTLCv2Instance<AlloyProvider>;
-pub type GardenHTLCv3Contract = GardenHTLCv3::GardenHTLCv3Instance<AlloyProvider>;
+pub type UnipayHTLCContract = UnipayHTLC::UnipayHTLCInstance<AlloyProvider>;
+pub type UnipayHTLCv2Contract = UnipayHTLCv2::UnipayHTLCv2Instance<AlloyProvider>;
+pub type UnipayHTLCv3Contract = UnipayHTLCv3::UnipayHTLCv3Instance<AlloyProvider>;
 pub type ERC20Contract = ERC20::ERC20Instance<AlloyProvider>;
 pub type Multicall3Contract = Multicall3::Multicall3Instance<AlloyProvider>;
 pub type OrderbookContract = Orderbook::OrderbookInstance<AlloyProvider>;

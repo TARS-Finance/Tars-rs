@@ -1,5 +1,5 @@
 use crate::{
-    htlc::traits::HTLCInterface, GardenHTLCContract, GardenHTLCv2Contract, GardenHTLCv3Contract, NativeHTLCContract, NativeHTLCv2Contract, NativeHTLCv3Contract
+    htlc::traits::HTLCInterface, UnipayHTLCContract, UnipayHTLCv2Contract, UnipayHTLCv3Contract, NativeHTLCContract, NativeHTLCv2Contract, NativeHTLCv3Contract
 };
 use alloy::{
     dyn_abi::Eip712Domain,
@@ -44,31 +44,31 @@ sol! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum GardenHandlerType {
+pub enum UnipayHandlerType {
     HTLC,
     // HTLCRegistry, (Currently Unsupported)
 }
 
-impl From<&GardenActionType> for GardenHandlerType {
-    fn from(action_type: &GardenActionType) -> Self {
+impl From<&UnipayActionType> for UnipayHandlerType {
+    fn from(action_type: &UnipayActionType) -> Self {
         match action_type {
-            GardenActionType::HTLC(_) => GardenHandlerType::HTLC,
+            UnipayActionType::HTLC(_) => UnipayHandlerType::HTLC,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum GardenActionType {
+pub enum UnipayActionType {
     HTLC(HTLCAction),
     // Any other contract type and its action can be added here
     // For example:
     // HTLCRegistry(HTLCRegistryAction)
 } 
 
-impl std::fmt::Display for GardenActionType {
+impl std::fmt::Display for UnipayActionType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GardenActionType::HTLC(action) => write!(f, "HTLC({})", action),
+            UnipayActionType::HTLC(action) => write!(f, "HTLC({})", action),
         }
     }
 }
@@ -77,9 +77,9 @@ impl std::fmt::Display for GardenActionType {
 ///
 /// This struct combines the method to be executed, the swap metadata, and the asset address.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GardenActionRequest {
+pub struct UnipayActionRequest {
     /// The action to invoke.
-    pub action: GardenActionType,
+    pub action: UnipayActionType,
 
     /// The swap data containing information about the transaction and parties involved.
     pub swap: EVMSwap,
@@ -165,19 +165,19 @@ impl Clone for HTLCContract {
 
 impl HTLCContract {
     // Factory methods for creating the enum variants
-    pub fn new_erc20_htlc(contract: GardenHTLCContract) -> Self {
+    pub fn new_erc20_htlc(contract: UnipayHTLCContract) -> Self {
         Self::ERC20HTLC {
             contract: Box::new(contract),
         }
     }
 
-    pub fn new_erc20_htlc_v2(contract: GardenHTLCv2Contract) -> Self {
+    pub fn new_erc20_htlc_v2(contract: UnipayHTLCv2Contract) -> Self {
         Self::ERC20HTLCv2 {
             contract: Box::new(contract),
         }
     }
 
-    pub fn new_erc20_htlc_v3(contract: GardenHTLCv3Contract) -> Self {
+    pub fn new_erc20_htlc_v3(contract: UnipayHTLCv3Contract) -> Self {
         Self::ERC20HTLCv3 {
             contract: Box::new(contract),
         }
@@ -274,8 +274,8 @@ pub struct SwapInfo {
     pub initiated_at: U256,
 }
 
-impl From<crate::GardenHTLC::ordersReturn> for SwapInfo {
-    fn from(order: crate::GardenHTLC::ordersReturn) -> Self {
+impl From<crate::UnipayHTLC::ordersReturn> for SwapInfo {
+    fn from(order: crate::UnipayHTLC::ordersReturn) -> Self {
         Self {
             initiator: order.initiator,
             redeemer: order.redeemer,
@@ -300,8 +300,8 @@ impl From<crate::NativeHTLC::ordersReturn> for SwapInfo {
     }
 }
 
-impl From<crate::GardenHTLCv2::ordersReturn> for SwapInfo {
-    fn from(order: crate::GardenHTLCv2::ordersReturn) -> Self {
+impl From<crate::UnipayHTLCv2::ordersReturn> for SwapInfo {
+    fn from(order: crate::UnipayHTLCv2::ordersReturn) -> Self {
         let is_fulfilled = order.fulfilledAt > U256::ZERO;
         Self {
             initiator: order.initiator,
@@ -328,8 +328,8 @@ impl From<crate::NativeHTLCv2::ordersReturn> for SwapInfo {
     }
 }
 
-impl From<crate::GardenHTLCv3::ordersReturn> for SwapInfo {
-    fn from(order: crate::GardenHTLCv3::ordersReturn) -> Self {
+impl From<crate::UnipayHTLCv3::ordersReturn> for SwapInfo {
+    fn from(order: crate::UnipayHTLCv3::ordersReturn) -> Self {
         let is_fulfilled = order.fulfilledAt > U256::ZERO;
         Self {
             initiator: order.initiator,

@@ -2,7 +2,7 @@ use crate::{
     errors::{EvmError, HTLCError},
     htlc::{common::get_instant_refund_signature, traits::HTLCInterface, v1::Initiate},
     primitives::{CallParams, InitiateTypedData, SwapInfo},
-    GardenHTLCv3Contract,
+    UnipayHTLCv3Contract,
 };
 use alloy::{
     dyn_abi::Eip712Domain,
@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use orderbook::primitives::EVMSwap;
 use serde_json::json;
 
-impl GardenHTLCv3Contract {
+impl UnipayHTLCv3Contract {
     async fn get_initiate_signature(
         &self,
         swap: &EVMSwap,
@@ -38,7 +38,7 @@ impl GardenHTLCv3Contract {
 }
 
 #[async_trait]
-impl HTLCInterface for GardenHTLCv3Contract {
+impl HTLCInterface for UnipayHTLCv3Contract {
     async fn initiate_calldata(
         &self,
         swap: &EVMSwap,

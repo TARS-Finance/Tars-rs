@@ -471,11 +471,16 @@ impl OrderMapper {
             return false;
         }
 
+        // Source must have been initiated before we can redeem it
+        if !self.has_valid_initiate(source_swap) {
+            return false;
+        }
+
         if !self.passes_additional_check(ActionType::Redeem, order) {
             return false;
         }
 
-        // Destination must have secret
+        // Destination must have been redeemed (secret populated by watcher after initia executor redeems)
         order.destination_swap.secret.is_some()
     }
 

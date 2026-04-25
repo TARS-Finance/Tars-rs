@@ -2,7 +2,7 @@ use crate::{
     errors::{EvmError, HTLCError},
     htlc::{common::get_instant_refund_signature, traits::HTLCInterface},
     primitives::{CallParams, InitiateTypedData, SwapInfo},
-    GardenHTLCContract,
+    UnipayHTLCContract,
 };
 use alloy::{
     dyn_abi::Eip712Domain,
@@ -56,7 +56,7 @@ impl From<&EVMSwap> for Initiate {
     }
 }
 
-impl GardenHTLCContract {
+impl UnipayHTLCContract {
     async fn get_initiate_signature(
         &self,
         swap: &EVMSwap,
@@ -73,14 +73,14 @@ impl GardenHTLCContract {
 }
 
 #[async_trait]
-impl HTLCInterface for GardenHTLCContract {
+impl HTLCInterface for UnipayHTLCContract {
     async fn initiate_calldata(
         &self,
         _swap: &EVMSwap,
         _asset: &Address,
     ) -> Result<Vec<CallParams>, HTLCError> {
         Err(HTLCError::UnsupportedAction {
-            action: "Direct initiate not supported for GardenHTLCContract".to_string(),
+            action: "Direct initiate not supported for UnipayHTLCContract".to_string(),
         })
     }
 

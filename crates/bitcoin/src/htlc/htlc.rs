@@ -30,33 +30,33 @@ use eyre::{bail, eyre, Result};
 use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
 
-/// Garden internal key for Taproot HTLC addresses
+/// Unipay internal key for Taproot HTLC addresses
 ///
 /// Generates a deterministic internal key using:
-/// 1. SHA256("GardenHTLC") as scalar r
+/// 1. SHA256("GardenHTLC") as scalar r (protocol tag — do not change, breaks Bitcoin HTLC compatibility)
 /// 2. BIP-341 H point
 /// 3. r*G + H for final public key
 ///
 /// This follows BIP-341's key generation scheme to create
 /// a provably uncontrollable internal key for better security.
-pub static GARDEN_NUMS: Lazy<XOnlyPublicKey> = Lazy::new(|| {
-    // Step 1: Hash "GardenHTLC" → r
+pub static UNIPAY_NUMS: Lazy<XOnlyPublicKey> = Lazy::new(|| {
+    // Step 1: Hash "GardenHTLC" → r (protocol tag kept as-is for Bitcoin script compatibility)
     let r = Sha256::digest(b"GardenHTLC");
 
     // Step 2: Parse the H point from BIP-341
     const H_HEX: &str = "0250929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0";
-    let h_bytes = hex::decode(H_HEX).expect("Invalid hex in GARDEN_NUMS_KEY");
-    let h = PublicKey::from_slice(&h_bytes).expect("Invalid H point in GARDEN_NUMS_KEY");
+    let h_bytes = hex::decode(H_HEX).expect("Invalid hex in UNIPAY_NUMS_KEY");
+    let h = PublicKey::from_slice(&h_bytes).expect("Invalid H point in UNIPAY_NUMS_KEY");
 
     // Step 3: r * G
     let secp = Secp256k1::new();
-    let r_scalar = SecretKey::from_slice(&r).expect("Invalid scalar in GARDEN_NUMS_KEY");
+    let r_scalar = SecretKey::from_slice(&r).expect("Invalid scalar in UNIPAY_NUMS_KEY");
     let r_g = PublicKey::from_secret_key(&secp, &r_scalar);
 
     // Step 4: H + r*G
     let nums = h
         .combine(&r_g)
-        .expect("Point addition failed in GARDEN_NUMS_KEY");
+        .expect("Point addition failed in UNIPAY_NUMS_KEY");
 
     // Step 5: Convert to x-only
     let (xonly, _) = nums.x_only_public_key();
@@ -292,7 +292,7 @@ pub async fn build_instant_refund_sacp(
 /// * When failing to construct the Taproot spending info
 pub fn get_htlc_address(htlc_params: &HTLCParams, network: Network) -> Result<Address> {
     let secp = Secp256k1::new();
-    let internal_key = *GARDEN_NUMS;
+    let internal_key = *UNIPAY_NUMS;
     let taproot_spend_info = construct_taproot_spend_info(htlc_params)?;
 
     let htlc_address = Address::p2tr(
@@ -389,7 +389,7 @@ pub fn construct_taproot_spend_info(htlc_params: &HTLCParams) -> Result<TaprootS
     if !taproot_builder.is_finalizable() {
         return Err(eyre!("Taproot builder is not in a finalizable state"));
     }
-    let internal_key = *GARDEN_NUMS;
+    let internal_key = *UNIPAY_NUMS;
 
     taproot_builder
         .finalize(&secp, internal_key)
@@ -475,7 +475,7 @@ mod tests {
 
         let taproot_spend_info = construct_taproot_spend_info(&htlc_params)?;
 
-        let internal_key = *GARDEN_NUMS;
+        let internal_key = *UNIPAY_NUMS;
         let redeem_leaf = redeem_leaf(&htlc_params.secret_hash, &htlc_params.redeemer_pubkey);
         let refund_leaf = refund_leaf(htlc_params.timelock, &htlc_params.initiator_pubkey);
         let instant_refund_leaf =

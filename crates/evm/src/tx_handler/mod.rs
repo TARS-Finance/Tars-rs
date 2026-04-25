@@ -285,7 +285,7 @@ mod tests {
     use super::*;
     use crate::{
         htlc::v1::Initiate,
-        primitives::{GardenActionRequest, GardenActionType, TxOptions},
+        primitives::{UnipayActionRequest, UnipayActionType, TxOptions},
         test_utils::{get_contracts, new_swap},
     };
     use ::primitives::{HTLCAction, HTLCVersion};
@@ -297,22 +297,22 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tx_confirmed() {
         let _ = tracing_subscriber::fmt::try_init();
-        let (_, htlc_contract, _, initiator, chain_id, garden_htlc_executor, provider) =
+        let (_, htlc_contract, _, initiator, chain_id, unipay_htlc_executor, provider) =
             get_contracts(HTLCVersion::V3).await;
         let asset = htlc_contract.address();
 
         // Create a swap and initiate it
         let (swap, _) = new_swap(initiator.address(), chain_id, *asset, HTLCVersion::V3);
 
-        let request = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::Initiate),
+        let request = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::Initiate),
             swap: swap.clone(),
             asset: htlc_contract.address().to_string(),
             id: swap.secret_hash.to_string(),
         };
 
         // Submit transaction using HTLC
-        let tx_hash = garden_htlc_executor
+        let tx_hash = unipay_htlc_executor
             .multicall(&[request], None)
             .await
             .expect("Failed to initiate swap");
@@ -322,12 +322,12 @@ mod tests {
             Duration::from_secs(30),
             provider,
             "ethereum_localnet".to_string(),
-            garden_htlc_executor,
+            unipay_htlc_executor,
         );
 
         // Create a simple request for the handler
-        let request = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::Initiate),
+        let request = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::Initiate),
             swap: swap.clone(),
             asset: htlc_contract.address().to_string(),
             id: swap.secret_hash.to_string(),
@@ -352,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tx_with_multicall() {
         let _ = tracing_subscriber::fmt::try_init();
-        let (_, htlc_contract, _, initiator, chain_id, garden_htlc_executor, provider) =
+        let (_, htlc_contract, _, initiator, chain_id, unipay_htlc_executor, provider) =
             get_contracts(HTLCVersion::V3).await;
         let asset = htlc_contract.address();
 
@@ -360,8 +360,8 @@ mod tests {
         let (swap, _) = new_swap(initiator.address(), chain_id, *asset, HTLCVersion::V3);
 
         // Create HTLC request
-        let request = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::Initiate),
+        let request = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::Initiate),
             swap: swap.clone(),
             asset: htlc_contract.address().to_string(),
             id: swap.secret_hash.to_string(),
@@ -370,7 +370,7 @@ mod tests {
         let requests = vec![request];
 
         // Submit transaction using HTLC multicall
-        let tx_hash = garden_htlc_executor
+        let tx_hash = unipay_htlc_executor
             .multicall(&requests, None)
             .await
             .expect("Failed to submit multicall");
@@ -380,7 +380,7 @@ mod tests {
             Duration::from_secs(30),
             provider,
             "ethereum_localnet".to_string(),
-            garden_htlc_executor,
+            unipay_htlc_executor,
         );
 
         // Wait for transaction confirmation
@@ -400,7 +400,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tx_with_replacement() {
         let _ = tracing_subscriber::fmt::try_init();
-        let (_, htlc_contract, _, initiator, chain_id, garden_htlc_executor, provider) =
+        let (_, htlc_contract, _, initiator, chain_id, unipay_htlc_executor, provider) =
             get_contracts(HTLCVersion::V3).await;
         let asset = htlc_contract.address();
 
@@ -421,8 +421,8 @@ mod tests {
             nonce: None,
         };
 
-        let request = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::Initiate),
+        let request = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::Initiate),
             swap: swap.clone(),
             asset: htlc_contract.address().to_string(),
             id: swap.secret_hash.to_string(),
@@ -431,7 +431,7 @@ mod tests {
         let requests = vec![request];
 
         // Submit transaction using HTLC multicall with low fees
-        let tx_hash = garden_htlc_executor
+        let tx_hash = unipay_htlc_executor
             .multicall(&requests, Some(tx_options))
             .await
             .expect("Failed to submit multicall");
@@ -441,7 +441,7 @@ mod tests {
             Duration::from_secs(10), // Shorter timeout to test replacement
             provider,
             "ethereum_localnet".to_string(),
-            garden_htlc_executor,
+            unipay_htlc_executor,
         );
 
         // Wait for transaction confirmation (may trigger replacement)
@@ -464,7 +464,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tx_redeem_flow() {
         let _ = tracing_subscriber::fmt::try_init();
-        let (_, htlc_contract, _, initiator, chain_id, garden_htlc_executor, provider) =
+        let (_, htlc_contract, _, initiator, chain_id, unipay_htlc_executor, provider) =
             get_contracts(HTLCVersion::V3).await;
         let asset = htlc_contract.address();
 
@@ -472,8 +472,8 @@ mod tests {
         let (swap, secret) = new_swap(initiator.address(), chain_id, *asset, HTLCVersion::V3);
 
         // First, initiate the swap
-        let initiate_request = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::Initiate),
+        let initiate_request = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::Initiate),
             swap: swap.clone(),
             asset: htlc_contract.address().to_string(),
             id: swap.secret_hash.to_string(),
@@ -482,7 +482,7 @@ mod tests {
         let initiate_requests = vec![initiate_request];
 
         // Submit initiation transaction
-        let initiate_tx_hash = garden_htlc_executor
+        let initiate_tx_hash = unipay_htlc_executor
             .multicall(&initiate_requests, None)
             .await
             .expect("Failed to submit initiation");
@@ -492,7 +492,7 @@ mod tests {
             Duration::from_secs(30),
             provider.clone(),
             "ethereum_localnet".to_string(),
-            garden_htlc_executor.clone(),
+            unipay_htlc_executor.clone(),
         );
 
         let initiate_result = tx_handler
@@ -512,8 +512,8 @@ mod tests {
         sleep(Duration::from_secs(5)).await;
 
         // Now create redeem request
-        let redeem_request = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::Redeem { secret }),
+        let redeem_request = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::Redeem { secret }),
             swap: swap.clone(),
             asset: htlc_contract.address().to_string(),
             id: swap.secret_hash.to_string(),
@@ -522,7 +522,7 @@ mod tests {
         let redeem_requests = vec![redeem_request];
 
         // Submit redeem transaction
-        let redeem_tx_hash = garden_htlc_executor
+        let redeem_tx_hash = unipay_htlc_executor
             .multicall(&redeem_requests, None)
             .await
             .expect("Failed to submit redeem");
@@ -544,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tx_with_signature() {
         let _ = tracing_subscriber::fmt::try_init();
-        let (garden_htlc, htlc_contract, _, initiator, chain_id, garden_htlc_executor, provider) =
+        let (unipay_htlc, htlc_contract, _, initiator, chain_id, unipay_htlc_executor, provider) =
             get_contracts(HTLCVersion::V3).await;
         let asset = htlc_contract.address();
 
@@ -552,7 +552,7 @@ mod tests {
         let (swap, _) = new_swap(initiator.address(), chain_id, *asset, HTLCVersion::V3);
 
         // Get domain for signing
-        let domain = garden_htlc.domain(htlc_contract.address()).await.unwrap();
+        let domain = unipay_htlc.domain(htlc_contract.address()).await.unwrap();
 
         // Create signature for initiation
         let initiate = Initiate {
@@ -568,8 +568,8 @@ mod tests {
             .expect("Failed to sign");
 
         // Create HTLC request with signature
-        let request = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::InitiateWithUserSignature {
+        let request = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::InitiateWithUserSignature {
                 signature: Bytes::from(signature.as_bytes()),
             }),
             swap: swap.clone(),
@@ -580,7 +580,7 @@ mod tests {
         let requests = vec![request];
 
         // Submit transaction using HTLC multicall with signature
-        let tx_hash = garden_htlc_executor
+        let tx_hash = unipay_htlc_executor
             .multicall(&requests, None)
             .await
             .expect("Failed to submit multicall with signature");
@@ -590,7 +590,7 @@ mod tests {
             Duration::from_secs(30),
             provider,
             "ethereum_localnet".to_string(),
-            garden_htlc_executor,
+            unipay_htlc_executor,
         );
 
         // Wait for transaction confirmation
@@ -613,7 +613,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tx_multiple_requests() {
         let _ = tracing_subscriber::fmt::try_init();
-        let (_, htlc_contract, _, initiator, chain_id, garden_htlc_executor, provider) =
+        let (_, htlc_contract, _, initiator, chain_id, unipay_htlc_executor, provider) =
             get_contracts(HTLCVersion::V3).await;
         let asset = htlc_contract.address();
 
@@ -622,15 +622,15 @@ mod tests {
         let (swap2, _) = new_swap(initiator.address(), chain_id, *asset, HTLCVersion::V3);
 
         // Create multiple requests
-        let request1 = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::Initiate),
+        let request1 = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::Initiate),
             swap: swap1.clone(),
             asset: htlc_contract.address().to_string(),
             id: swap1.secret_hash.to_string(),
         };
 
-        let request2 = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::Initiate),
+        let request2 = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::Initiate),
             swap: swap2.clone(),
             asset: htlc_contract.address().to_string(),
             id: swap2.secret_hash.to_string(),
@@ -639,7 +639,7 @@ mod tests {
         let requests = vec![request1, request2];
 
         // Submit transaction using HTLC multicall with multiple requests
-        let tx_hash = garden_htlc_executor
+        let tx_hash = unipay_htlc_executor
             .multicall(&requests, None)
             .await
             .expect("Failed to submit multicall with multiple requests");
@@ -649,7 +649,7 @@ mod tests {
             Duration::from_secs(30),
             provider,
             "ethereum_localnet".to_string(),
-            garden_htlc_executor,
+            unipay_htlc_executor,
         );
 
         // Wait for transaction confirmation
@@ -675,7 +675,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tx_with_custom_options() {
         let _ = tracing_subscriber::fmt::try_init();
-        let (_, htlc_contract, _, initiator, chain_id, garden_htlc_executor, provider) =
+        let (_, htlc_contract, _, initiator, chain_id, unipay_htlc_executor, provider) =
             get_contracts(HTLCVersion::V3).await;
         let asset = htlc_contract.address();
 
@@ -690,8 +690,8 @@ mod tests {
             nonce: None,
         };
 
-        let request = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::Initiate),
+        let request = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::Initiate),
             swap: swap.clone(),
             asset: htlc_contract.address().to_string(),
             id: swap.secret_hash.to_string(),
@@ -700,7 +700,7 @@ mod tests {
         let requests = vec![request];
 
         // Submit transaction using HTLC multicall with custom options
-        let tx_hash = garden_htlc_executor
+        let tx_hash = unipay_htlc_executor
             .multicall(&requests, Some(tx_options))
             .await
             .expect("Failed to submit multicall with custom options");
@@ -710,7 +710,7 @@ mod tests {
             Duration::from_secs(30),
             provider,
             "ethereum_localnet".to_string(),
-            garden_htlc_executor,
+            unipay_htlc_executor,
         );
 
         // Wait for transaction confirmation
@@ -730,7 +730,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tx_timeout_behavior() {
         let _ = tracing_subscriber::fmt::try_init();
-        let (_, htlc_contract, _, initiator, chain_id, garden_htlc_executor, provider) =
+        let (_, htlc_contract, _, initiator, chain_id, unipay_htlc_executor, provider) =
             get_contracts(HTLCVersion::V3).await;
         let asset = htlc_contract.address();
 
@@ -738,8 +738,8 @@ mod tests {
         let (swap, _) = new_swap(initiator.address(), chain_id, *asset, HTLCVersion::V3);
 
         // Create HTLC request
-        let request = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::Initiate),
+        let request = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::Initiate),
             swap: swap.clone(),
             asset: htlc_contract.address().to_string(),
             id: swap.secret_hash.to_string(),
@@ -748,7 +748,7 @@ mod tests {
         let requests = vec![request];
 
         // Submit transaction using HTLC multicall
-        let tx_hash = garden_htlc_executor
+        let tx_hash = unipay_htlc_executor
             .multicall(&requests, None)
             .await
             .expect("Failed to submit multicall");
@@ -758,7 +758,7 @@ mod tests {
             Duration::from_millis(100), // Very short timeout
             provider,
             "ethereum_localnet".to_string(),
-            garden_htlc_executor,
+            unipay_htlc_executor,
         );
 
         // Wait for transaction confirmation (should timeout quickly)

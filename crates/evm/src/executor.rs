@@ -10,23 +10,23 @@ use crate::{
     errors::{sanitize_error, EvmError, HTLCError, MulticallError},
     multicall::Multicall,
     primitives::{
-        GardenActionRequest, GardenHandlerType, RequestCallBatch, SimulationResult, TxOptions,
+        UnipayActionRequest, UnipayHandlerType, RequestCallBatch, SimulationResult, TxOptions,
     },
-    traits::GardenActionHandler,
+    traits::UnipayActionHandler,
     tx_handler::traits::TransactionSubmitter,
     Multicall3Contract,
 };
 
 #[derive(Clone)]
-pub struct GardenActionExecutor {
+pub struct UnipayActionExecutor {
     multicall_contract: Arc<Multicall3Contract>,
-    handlers: HashMap<GardenHandlerType, Arc<dyn GardenActionHandler>>,
+    handlers: HashMap<UnipayHandlerType, Arc<dyn UnipayActionHandler>>,
 }
 
-impl GardenActionExecutor {
+impl UnipayActionExecutor {
     pub fn new(
         multicall_contract: Arc<Multicall3Contract>,
-        handlers: HashMap<GardenHandlerType, Arc<dyn GardenActionHandler>>,
+        handlers: HashMap<UnipayHandlerType, Arc<dyn UnipayActionHandler>>,
     ) -> Self {
         Self {
             handlers,
@@ -56,7 +56,7 @@ impl GardenActionExecutor {
     /// Returns `ContractError` if multicall construction fails.
     async fn prepare_multicall(
         &self,
-        requests: &[GardenActionRequest],
+        requests: &[UnipayActionRequest],
     ) -> Result<(Vec<SimulationResult>, Multicall, Vec<RequestCallBatch>), MulticallError> {
         // Initialize all results - will be populated with errors or marked as successful
         let mut results = vec![SimulationResult::default(); requests.len()];
@@ -85,7 +85,7 @@ impl GardenActionExecutor {
 
             let handler = self
                 .handlers
-                .get(&GardenHandlerType::from(&request.action))
+                .get(&UnipayHandlerType::from(&request.action))
                 .ok_or(MulticallError::Error(
                     "No handler found for action".to_string(),
                 ))?;
@@ -234,7 +234,7 @@ impl GardenActionExecutor {
     /// ```
     pub async fn actions_dry_run(
         &self,
-        requests: &[GardenActionRequest],
+        requests: &[UnipayActionRequest],
     ) -> Result<Vec<SimulationResult>, MulticallError> {
         if requests.is_empty() {
             return Ok(Vec::new());
@@ -268,7 +268,7 @@ impl GardenActionExecutor {
     /// ```
     pub async fn multicall(
         &self,
-        requests: &[GardenActionRequest],
+        requests: &[UnipayActionRequest],
         options: Option<TxOptions>,
     ) -> Result<FixedBytes<32>, MulticallError> {
         if requests.is_empty() {
@@ -291,7 +291,7 @@ impl GardenActionExecutor {
 
             let handler = self
                 .handlers
-                .get(&GardenHandlerType::from(&request.action))
+                .get(&UnipayHandlerType::from(&request.action))
                 .ok_or(MulticallError::Error(
                     "No handler found for action".to_string(),
                 ))?;
@@ -368,10 +368,10 @@ impl GardenActionExecutor {
 }
 
 #[async_trait::async_trait]
-impl TransactionSubmitter<GardenActionRequest> for GardenActionExecutor {
+impl TransactionSubmitter<UnipayActionRequest> for UnipayActionExecutor {
     async fn submit_transaction(
         &mut self,
-        requests: &[GardenActionRequest],
+        requests: &[UnipayActionRequest],
         tx_options: TxOptions,
     ) -> eyre::Result<FixedBytes<32>> {
         self.multicall(requests, Some(tx_options))
@@ -393,7 +393,7 @@ mod tests {
 
     use crate::{
         htlc::v1::Initiate,
-        primitives::GardenActionType,
+        primitives::UnipayActionType,
         test_utils::{self, get_contracts},
     };
 
@@ -401,7 +401,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prepare_multicall_and_execute_multicall_and_process_results() {
-        use crate::primitives::GardenActionRequest;
+        use crate::primitives::UnipayActionRequest;
         use alloy::primitives::Bytes;
 
         let (chain_htlc, htlc_contract, _, initiator, chain_id, contract_wrapper, _) =
@@ -422,8 +422,8 @@ mod tests {
             .await
             .expect("Failed to sign");
 
-        let valid_request = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::InitiateWithUserSignature {
+        let valid_request = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::InitiateWithUserSignature {
                 signature: Bytes::from(sig.as_bytes()),
             }),
             swap: swap.clone(),
@@ -432,8 +432,8 @@ mod tests {
         };
 
         // Invalid request: bad asset address
-        let invalid_request = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::Initiate),
+        let invalid_request = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::Initiate),
             swap: swap.clone(),
             asset: "not_an_address".to_string(),
             id: "bad_id".to_string(),
@@ -442,8 +442,8 @@ mod tests {
         // Invalid request: zero amount
         let mut bad_swap = swap.clone();
         bad_swap.amount = U256::ZERO;
-        let zero_amount_request = GardenActionRequest {
-            action: GardenActionType::HTLC(HTLCAction::Initiate),
+        let zero_amount_request = UnipayActionRequest {
+            action: UnipayActionType::HTLC(HTLCAction::Initiate),
             swap: bad_swap,
             asset: htlc_contract.address().to_string(),
             id: "zero_amount".to_string(),
@@ -495,8 +495,8 @@ mod tests {
             .await
             .expect("Failed to sign");
 
-        let request1 = super::GardenActionRequest {
-            action: GardenActionType::HTLC(primitives::HTLCAction::InitiateWithUserSignature {
+        let request1 = super::UnipayActionRequest {
+            action: UnipayActionType::HTLC(primitives::HTLCAction::InitiateWithUserSignature {
                 signature: Bytes::from(sig.as_bytes()),
             }),
             swap: swap.clone(),
@@ -504,8 +504,8 @@ mod tests {
             id: swap.secret_hash.to_string(),
         };
 
-        let request2 = super::GardenActionRequest {
-            action: GardenActionType::HTLC(primitives::HTLCAction::Redeem { secret }),
+        let request2 = super::UnipayActionRequest {
+            action: UnipayActionType::HTLC(primitives::HTLCAction::Redeem { secret }),
             swap: swap.clone(),
             asset: htlc_contract.address().to_string(),
             id: swap.secret_hash.to_string(),
@@ -543,8 +543,8 @@ mod tests {
             .await
             .expect("Failed to sign");
 
-        let request = GardenActionRequest {
-            action: GardenActionType::HTLC(primitives::HTLCAction::InitiateWithUserSignature {
+        let request = UnipayActionRequest {
+            action: UnipayActionType::HTLC(primitives::HTLCAction::InitiateWithUserSignature {
                 signature: Bytes::from(sig.as_bytes()),
             }),
             swap: swap.clone(),

@@ -9,9 +9,9 @@ pub mod v3;
 
 use crate::{
     errors::{EvmError, HTLCError, MulticallError},
-    primitives::{AlloyProvider, CallParams, GardenActionType, HTLCContract, SwapInfo, TokenType},
-    traits::GardenActionHandler,
-    GardenHTLCContract, GardenHTLCv2Contract, GardenHTLCv3Contract, NativeHTLCContract,
+    primitives::{AlloyProvider, CallParams, UnipayActionType, HTLCContract, SwapInfo, TokenType},
+    traits::UnipayActionHandler,
+    UnipayHTLCContract, UnipayHTLCv2Contract, UnipayHTLCv3Contract, NativeHTLCContract,
     NativeHTLCv2Contract, NativeHTLCv3Contract,
     ERC20::ERC20Instance,
 };
@@ -39,14 +39,14 @@ pub const APPROVAL_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Delay between approval transaction polling
 pub const APPROVAL_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// A struct that represents a Garden HTLC for each chain.
+/// A struct that represents a Unipay HTLC for each chain.
 /// This struct provides functionality to interact with different types of HTLC contracts
 /// on EVM-compatible chains.
 ///
 /// It wraps the multicall contract and provides methods to interact with the HTLC
 /// to provide a high-level interface for atomic swaps.
 #[derive(Clone)]
-pub struct GardenHTLC {
+pub struct UnipayHTLC {
     token_cache: Cache<Address, Address>,
     htlc_cache: Cache<Address, HTLCContract>,
     domain_cache: Cache<Address, Eip712Domain>,
@@ -55,14 +55,14 @@ pub struct GardenHTLC {
     provider: AlloyProvider,
 }
 
-/// Implementation of the GardenHTLC functionality
+/// Implementation of the UnipayHTLC functionality
 ///
 /// This implementation provides methods to interact with HTLC contracts including:
 /// - Initiating swaps
 /// - Redeeming swaps
 /// - Refunding expired swaps
-impl GardenHTLC {
-    /// Creates a new instance of GardenHTLC.
+impl UnipayHTLC {
+    /// Creates a new instance of UnipayHTLC.
     ///
     /// # Arguments
     ///
@@ -71,15 +71,15 @@ impl GardenHTLC {
     ///
     /// # Returns
     ///
-    /// Returns a new GardenHTLC instance.
+    /// Returns a new UnipayHTLC instance.
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// use evm::{GardenHTLC};
+    /// use evm::{UnipayHTLC};
     ///
     /// async fn example() {
-    ///     let chain_htlc = GardenHTLC::new(signer, provider);
+    ///     let chain_htlc = UnipayHTLC::new(signer, provider);
     /// }
     /// ```
     pub fn new(signer: LocalSigner<SigningKey>, provider: AlloyProvider) -> Self {
@@ -112,7 +112,7 @@ impl GardenHTLC {
             return Ok(token);
         }
 
-        let htlc_contract = GardenHTLCContract::new(*htlc_address, self.provider.clone());
+        let htlc_contract = UnipayHTLCContract::new(*htlc_address, self.provider.clone());
         let token = htlc_contract
             .token()
             .call()
@@ -167,19 +167,19 @@ impl GardenHTLC {
 
                 match version {
                     HTLCVersion::V1 => {
-                        let garden_v1_contract =
-                            GardenHTLCContract::new(*htlc_address, self.provider.clone());
-                        HTLCContract::new_erc20_htlc(garden_v1_contract)
+                        let unipay_v1_contract =
+                            UnipayHTLCContract::new(*htlc_address, self.provider.clone());
+                        HTLCContract::new_erc20_htlc(unipay_v1_contract)
                     }
                     HTLCVersion::V2 => {
-                        let garden_v2_contract =
-                            GardenHTLCv2Contract::new(*htlc_address, self.provider.clone());
-                        HTLCContract::new_erc20_htlc_v2(garden_v2_contract)
+                        let unipay_v2_contract =
+                            UnipayHTLCv2Contract::new(*htlc_address, self.provider.clone());
+                        HTLCContract::new_erc20_htlc_v2(unipay_v2_contract)
                     }
                     HTLCVersion::V3 => {
-                        let garden_v3_contract =
-                            GardenHTLCv3Contract::new(*htlc_address, self.provider.clone());
-                        HTLCContract::new_erc20_htlc_v3(garden_v3_contract)
+                        let unipay_v3_contract =
+                            UnipayHTLCv3Contract::new(*htlc_address, self.provider.clone());
+                        HTLCContract::new_erc20_htlc_v3(unipay_v3_contract)
                     }
                 }
             }
@@ -264,10 +264,10 @@ impl GardenHTLC {
     ///
     /// # Example
     /// ```rust,ignore
-    /// use evm::GardenHTLC;
+    /// use evm::UnipayHTLC;
     /// use alloy::network::EthereumWallet;
     ///
-    /// async fn example(htlc: &GardenHTLC, wallet: &EthereumWallet, message: &impl SolValue) {
+    /// async fn example(htlc: &UnipayHTLC, wallet: &EthereumWallet, message: &impl SolValue) {
     ///     let domain = htlc.domain(asset).await?;
     ///     let signature = wallet.sign_typed_data(message, &domain).await?;
     /// }
@@ -305,7 +305,7 @@ impl GardenHTLC {
         }
 
         // Using the same abi for all versions, we can determine the version by checking the contract
-        let htlc = GardenHTLCContract::new(*asset, self.provider.clone());
+        let htlc = UnipayHTLCContract::new(*asset, self.provider.clone());
 
         let domain = htlc
             .eip712Domain()
@@ -343,10 +343,10 @@ impl GardenHTLC {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use evm::GardenHTLC;
+    /// use evm::UnipayHTLC;
     /// use alloy::primitives::Address;
     ///
-    /// async fn example(htlc: &GardenHTLC) {
+    /// async fn example(htlc: &UnipayHTLC) {
     ///     let htlc_address = Address::from_hex("0x1234...").unwrap();
     ///     let token_type = htlc.token_type(&htlc_address).await?;
     ///     match token_type {
@@ -374,15 +374,15 @@ impl GardenHTLC {
 }
 
 #[async_trait::async_trait]
-impl GardenActionHandler for GardenHTLC {
+impl UnipayActionHandler for UnipayHTLC {
     async fn get_calldata(
         &self,
-        action: &GardenActionType,
+        action: &UnipayActionType,
         swap: &EVMSwap,
         asset: &Address,
     ) -> Result<Vec<CallParams>, MulticallError> {
         let action = match action {
-            GardenActionType::HTLC(action) => action,
+            UnipayActionType::HTLC(action) => action,
             // Each handler should return an error for any ActionType variant other than the one it is designed to handle.
             // _ => return Err(MulticallError::Error("Unsupported action".to_string())),
         };
@@ -467,11 +467,11 @@ pub async fn approve(
 #[cfg(test)]
 mod tests {
     use crate::{
-        executor::GardenActionExecutor,
-        htlc::{approve, GardenHTLC},
-        primitives::{GardenActionRequest, GardenActionType, GardenHandlerType},
+        executor::UnipayActionExecutor,
+        htlc::{approve, UnipayHTLC},
+        primitives::{UnipayActionRequest, UnipayActionType, UnipayHandlerType},
         test_utils::{self, get_contracts, multicall_contract, Network},
-        traits::GardenActionHandler,
+        traits::UnipayActionHandler,
     };
     use alloy::providers::ext::AnvilApi;
     use primitives::{HTLCAction, HTLCVersion};
@@ -494,8 +494,8 @@ mod tests {
             let (swap, _) =
                 test_utils::new_swap(initiator.address(), chain_id, *asset, version.clone());
 
-            let request = GardenActionRequest {
-                action: GardenActionType::HTLC(HTLCAction::Initiate),
+            let request = UnipayActionRequest {
+                action: UnipayActionType::HTLC(HTLCAction::Initiate),
                 swap: swap.clone(),
                 asset: htlc_contract.address().to_string(),
                 id: swap.secret_hash.to_string(),
@@ -528,8 +528,8 @@ mod tests {
             let asset = htlc_contract.address();
             let (swap, _) =
                 test_utils::new_swap(initiator.address(), chain_id, *asset, version.clone());
-            let request = GardenActionRequest {
-                action: GardenActionType::HTLC(HTLCAction::InitiateWithSignature),
+            let request = UnipayActionRequest {
+                action: UnipayActionType::HTLC(HTLCAction::InitiateWithSignature),
                 swap: swap.clone(),
                 asset: htlc_contract.address().to_string(),
                 id: swap.secret_hash.to_string(),
@@ -571,8 +571,8 @@ mod tests {
             let (swap, secret) =
                 test_utils::new_swap(initiator.address(), chain_id, *asset, version.clone());
 
-            let request = GardenActionRequest {
-                action: GardenActionType::HTLC(HTLCAction::Initiate),
+            let request = UnipayActionRequest {
+                action: UnipayActionType::HTLC(HTLCAction::Initiate),
                 swap: swap.clone(),
                 asset: htlc_contract.address().to_string(),
                 id: swap.secret_hash.to_string(),
@@ -595,8 +595,8 @@ mod tests {
             assert!(!order.is_fulfilled);
             info!("Order initiator: {:#?}", order.initiator);
 
-            let request = GardenActionRequest {
-                action: GardenActionType::HTLC(HTLCAction::Redeem {
+            let request = UnipayActionRequest {
+                action: UnipayActionType::HTLC(HTLCAction::Redeem {
                     secret: secret.clone(),
                 }),
                 swap: swap.clone(),
@@ -637,8 +637,8 @@ mod tests {
             let (swap, _) =
                 test_utils::new_swap(initiator.address(), chain_id, *asset, version.clone());
 
-            let request = GardenActionRequest {
-                action: GardenActionType::HTLC(HTLCAction::Initiate),
+            let request = UnipayActionRequest {
+                action: UnipayActionType::HTLC(HTLCAction::Initiate),
                 swap: swap.clone(),
                 asset: htlc_contract.address().to_string(),
                 id: swap.secret_hash.to_string(),
@@ -655,8 +655,8 @@ mod tests {
 
             sleep(Duration::from_secs(10)).await;
 
-            let request = GardenActionRequest {
-                action: GardenActionType::HTLC(HTLCAction::Refund),
+            let request = UnipayActionRequest {
+                action: UnipayActionType::HTLC(HTLCAction::Refund),
                 swap: swap.clone(),
                 asset: htlc_contract.address().to_string(),
                 id: swap.secret_hash.to_string(),
@@ -688,8 +688,8 @@ mod tests {
             let (swap, _) =
                 test_utils::new_swap(initiator.address(), chain_id, *asset, version.clone());
 
-            let request = GardenActionRequest {
-                action: GardenActionType::HTLC(HTLCAction::Initiate),
+            let request = UnipayActionRequest {
+                action: UnipayActionType::HTLC(HTLCAction::Initiate),
                 swap: swap.clone(),
                 asset: htlc_contract.address().to_string(),
                 id: swap.secret_hash.to_string(),
@@ -712,16 +712,16 @@ mod tests {
             let provider = test_utils::ethereum_provider(Some(wallet));
             let multicall3_instance =
                 Arc::new(multicall_contract(provider.clone(), Network::Ethereum));
-            let redeemer_htlc = Arc::new(GardenHTLC::new(signer, provider));
+            let redeemer_htlc = Arc::new(UnipayHTLC::new(signer, provider));
             let mut handlers = HashMap::new();
             handlers.insert(
-                GardenHandlerType::HTLC,
-                redeemer_htlc as Arc<dyn GardenActionHandler>,
+                UnipayHandlerType::HTLC,
+                redeemer_htlc as Arc<dyn UnipayActionHandler>,
             );
-            let multicall = GardenActionExecutor::new(multicall3_instance, handlers);
+            let multicall = UnipayActionExecutor::new(multicall3_instance, handlers);
 
-            let request = GardenActionRequest {
-                action: GardenActionType::HTLC(primitives::HTLCAction::InstantRefund),
+            let request = UnipayActionRequest {
+                action: UnipayActionType::HTLC(primitives::HTLCAction::InstantRefund),
                 swap: swap.clone(),
                 asset: htlc_contract.address().to_string(),
                 id: swap.secret_hash.to_string(),
@@ -752,8 +752,8 @@ mod tests {
             let (swap, _) =
                 test_utils::new_swap(initiator.address(), chain_id, *asset, version.clone());
 
-            let request = GardenActionRequest {
-                action: GardenActionType::HTLC(primitives::HTLCAction::InitiateWithSignature),
+            let request = UnipayActionRequest {
+                action: UnipayActionType::HTLC(primitives::HTLCAction::InitiateWithSignature),
                 swap: swap.clone(),
                 asset: htlc_contract.address().to_string(),
                 id: swap.secret_hash.to_string(),

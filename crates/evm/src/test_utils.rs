@@ -1,11 +1,11 @@
 use crate::{
-    executor::GardenActionExecutor,
-    htlc::GardenHTLC,
-    primitives::{AlloyProvider, GardenHandlerType},
-    traits::GardenActionHandler,
+    executor::UnipayActionExecutor,
+    htlc::UnipayHTLC,
+    primitives::{AlloyProvider, UnipayHandlerType},
+    traits::UnipayActionHandler,
     ERC20Contract,
-    GardenHTLC::GardenHTLCInstance,
-    GardenHTLCContract, Multicall3Contract, OrderbookContract,
+    UnipayHTLC::UnipayHTLCInstance,
+    UnipayHTLCContract, Multicall3Contract, OrderbookContract,
     ERC20::ERC20Instance,
 };
 use alloy::{
@@ -30,18 +30,18 @@ use tracing::info;
 use utils::gen_secret;
 
 type Contracts = (
-    Arc<GardenHTLC>,
-    GardenHTLCInstance<AlloyProvider>,
+    Arc<UnipayHTLC>,
+    UnipayHTLCInstance<AlloyProvider>,
     ERC20Instance<AlloyProvider>,
     PrivateKeySigner,
     u64,
-    GardenActionExecutor,
+    UnipayActionExecutor,
     AlloyProvider,
 );
 
 /// Returns a tuple containing:
 /// * The HTLCHandler
-/// * The GardenHTLC contract
+/// * The UnipayHTLC contract
 /// * The ERC20 contract
 /// * The PrivateKeySigner
 /// * The chain ID
@@ -60,15 +60,15 @@ pub async fn get_contracts(version: HTLCVersion) -> Contracts {
         .await
         .expect("Failed to get chain ID");
     let multicall3 = Arc::new(multicall3);
-    let htlc = Arc::new(GardenHTLC::new(signer.clone(), provider.clone()));
+    let htlc = Arc::new(UnipayHTLC::new(signer.clone(), provider.clone()));
 
     let mut handlers = HashMap::new();
     handlers.insert(
-        GardenHandlerType::HTLC,
-        Arc::new(GardenHTLC::new(signer.clone(), provider.clone())) as Arc<dyn GardenActionHandler>,
+        UnipayHandlerType::HTLC,
+        Arc::new(UnipayHTLC::new(signer.clone(), provider.clone())) as Arc<dyn UnipayActionHandler>,
     );
 
-    let contract_wrapper = GardenActionExecutor::new(multicall3.clone(), handlers);
+    let contract_wrapper = UnipayActionExecutor::new(multicall3.clone(), handlers);
     (
         htlc,
         htlc_contract,
@@ -187,7 +187,7 @@ pub async fn approve_htlc_token(provider: AlloyProvider) {
     } else {
         "6d49021ebF8172F4B51A52a621C7Fc94BD8364cF"
     };
-    let htlc_contract = GardenHTLCContract::new(Address::from_hex(addr).unwrap(), provider.clone());
+    let htlc_contract = UnipayHTLCContract::new(Address::from_hex(addr).unwrap(), provider.clone());
 
     let token = htlc_contract.token().call().await.unwrap();
 
@@ -208,7 +208,7 @@ pub async fn approve_htlc_token(provider: AlloyProvider) {
 /// Gets the HTLC contract and related contracts for the specified provider.
 ///
 /// This function creates contract instances for:
-/// 1. The Garden HTLC contract
+/// 1. The Unipay HTLC contract
 /// 2. The associated ERC20 token contract
 /// 3. A multicall contract for batched execution
 ///
@@ -219,7 +219,7 @@ pub async fn approve_htlc_token(provider: AlloyProvider) {
 ///
 /// # Returns
 /// A tuple containing:
-/// * The Garden HTLC contract
+/// * The Unipay HTLC contract
 /// * The ERC20 token contract
 /// * A multicall contract for batched calls
 ///
@@ -228,7 +228,7 @@ pub async fn approve_htlc_token(provider: AlloyProvider) {
 pub async fn htlc_contract(
     provider: AlloyProvider,
     version: HTLCVersion,
-) -> (GardenHTLCContract, ERC20Contract, Multicall3Contract) {
+) -> (UnipayHTLCContract, ERC20Contract, Multicall3Contract) {
     let chain = provider.get_chain_id().await.unwrap();
     let addr;
     let network;
@@ -257,7 +257,7 @@ pub async fn htlc_contract(
         },
         _ => panic!("version not supported"),
     };
-    let htlc = GardenHTLCContract::new(Address::from_hex(addr).unwrap(), provider.clone());
+    let htlc = UnipayHTLCContract::new(Address::from_hex(addr).unwrap(), provider.clone());
 
     let token_address = htlc
         .token()
@@ -372,7 +372,7 @@ pub fn arbitrum_provider(wallet: Option<EthereumWallet>) -> AlloyProvider {
 
 /// Creates an orderbook contract instance connected to Arbitrum.
 ///
-/// This function instantiates the Garden orderbook contract on the Arbitrum
+/// This function instantiates the Unipay orderbook contract on the Arbitrum
 /// network using a hardcoded address and the default wallet.
 ///
 /// # Returns

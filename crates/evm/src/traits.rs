@@ -1,6 +1,6 @@
 use crate::{
     errors::MulticallError,
-    primitives::{GardenActionType, CallParams},
+    primitives::{UnipayActionType, CallParams},
 };
 use alloy::primitives::Address;
 use orderbook::primitives::EVMSwap;
@@ -16,7 +16,7 @@ use orderbook::primitives::EVMSwap;
 ///
 /// See [`ActionType`] for the complete list of supported action types.
 #[async_trait::async_trait]
-pub trait GardenActionHandler : Send + Sync {
+pub trait UnipayActionHandler : Send + Sync {
     /// Generates calldata for a specific contract action.
     ///
     /// This method takes an action type (which can be any variant of [`ActionType`]), swap details, and asset
@@ -51,7 +51,7 @@ pub trait GardenActionHandler : Send + Sync {
     /// ```
     async fn get_calldata(
         &self,
-        action: &GardenActionType,
+        action: &UnipayActionType,
         swap: &EVMSwap,
         asset: &Address,
     ) -> Result<Vec<CallParams>, MulticallError>;

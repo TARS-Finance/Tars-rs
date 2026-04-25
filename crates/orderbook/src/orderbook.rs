@@ -806,11 +806,13 @@ impl Orderbook for OrderbookProvider {
     ) -> Result<(), OrderbookError> {
         let mut tx: Transaction<'_, Postgres> = self.pool.begin().await?;
 
-        let is_source_bitcoin = order.source_swap.chain.contains("bitcoin");
-        let is_destination_bitcoin = order.destination_swap.chain.contains("bitcoin");
-        // Helper to normalize strings based on chain (Bitcoin addresses are case-sensitive)
-        let normalize_address = |addr: &str, is_bitcoin: bool| -> String {
-            if is_bitcoin {
+        let is_source_case_sensitive = order.source_swap.chain.contains("bitcoin")
+            || order.source_swap.chain.contains("solana");
+        let is_destination_case_sensitive = order.destination_swap.chain.contains("bitcoin")
+            || order.destination_swap.chain.contains("solana");
+        // Helper to normalize strings based on chain (Bitcoin and Solana addresses are case-sensitive)
+        let normalize_address = |addr: &str, is_case_sensitive: bool| -> String {
+            if is_case_sensitive {
                 addr.to_string()
             } else {
                 addr.to_lowercase()
@@ -837,11 +839,11 @@ impl Orderbook for OrderbookProvider {
             .bind(&order.source_swap.asset.to_lowercase())
             .bind(normalize_address(
                 &order.source_swap.initiator,
-                is_source_bitcoin,
+                is_source_case_sensitive,
             ))
             .bind(normalize_address(
                 &order.source_swap.redeemer,
-                is_source_bitcoin,
+                is_source_case_sensitive,
             ))
             .bind(&order.source_swap.timelock)
             .bind(&order.source_swap.filled_amount)
@@ -858,11 +860,11 @@ impl Orderbook for OrderbookProvider {
             .bind(&order.source_swap.current_confirmations)
             .bind(normalize_address(
                 order.source_swap.htlc_address.as_deref().unwrap_or(""),
-                is_source_bitcoin,
+                is_source_case_sensitive,
             ))
             .bind(normalize_address(
                 order.source_swap.token_address.as_deref().unwrap_or(""),
-                is_source_bitcoin,
+                is_source_case_sensitive,
             ))
             // Destination swap
             .bind(&order.destination_swap.created_at)
@@ -873,11 +875,11 @@ impl Orderbook for OrderbookProvider {
             .bind(&order.destination_swap.asset.to_lowercase())
             .bind(normalize_address(
                 &order.destination_swap.initiator,
-                is_destination_bitcoin,
+                is_destination_case_sensitive,
             ))
             .bind(normalize_address(
                 &order.destination_swap.redeemer,
-                is_destination_bitcoin,
+                is_destination_case_sensitive,
             ))
             .bind(&order.destination_swap.timelock)
             .bind(&order.destination_swap.filled_amount)
@@ -894,7 +896,7 @@ impl Orderbook for OrderbookProvider {
             .bind(&order.destination_swap.current_confirmations)
             .bind(normalize_address(
                 order.destination_swap.htlc_address.as_deref().unwrap_or(""),
-                is_destination_bitcoin,
+                is_destination_case_sensitive,
             ))
             .bind(normalize_address(
                 order
@@ -902,7 +904,7 @@ impl Orderbook for OrderbookProvider {
                     .token_address
                     .as_deref()
                     .unwrap_or(""),
-                is_destination_bitcoin,
+                is_destination_case_sensitive,
             ))
             .execute(&mut *tx)
             .await?;
@@ -936,18 +938,21 @@ impl Orderbook for OrderbookProvider {
             .bind(&co.block_number)
             .bind(&co.source_chain)
             .bind(&co.destination_chain)
-            .bind(normalize_address(&co.source_asset, is_source_bitcoin))
+            .bind(normalize_address(
+                &co.source_asset,
+                is_source_case_sensitive,
+            ))
             .bind(normalize_address(
                 &co.destination_asset,
-                is_destination_bitcoin,
+                is_destination_case_sensitive,
             ))
             .bind(normalize_address(
                 &co.initiator_source_address,
-                is_source_bitcoin,
+                is_source_case_sensitive,
             ))
             .bind(normalize_address(
                 &co.initiator_destination_address,
-                is_destination_bitcoin,
+                is_destination_case_sensitive,
             ))
             .bind(&co.source_amount)
             .bind(&co.destination_amount)
@@ -3360,6 +3365,58 @@ mod tests {
         assert_eq!(
             order.destination_swap.token_address,
             matched_order.destination_swap.token_address
+        );
+
+        delete_matched_order(&provider.pool, &matched_order.create_order.create_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_create_matched_order_preserves_solana_address_case() {
+        let provider = provider().await;
+        delete_all_matched_orders(&provider.pool).await.unwrap();
+
+        let sol_initiator = "6zo8pUmpTisTKp19goQEDPNbmyxf6FtEXaGJnmcgaqbU".to_string();
+        let sol_redeemer = "GuTqTajbyF4d6F7CRWJApiensETs2sDPHK9BXMEV3yjt".to_string();
+
+        let mut order = default_matched_order();
+        order.source_swap.swap_id = "solana-case-source".to_string();
+        order.destination_swap.swap_id = "solana-case-destination".to_string();
+        order.create_order.create_id = "solana-case-create-order".to_string();
+
+        order.source_swap.chain = "solana_devnet".to_string();
+        order.source_swap.asset = "primary".to_string();
+        order.source_swap.htlc_address = Some("primary".to_string());
+        order.source_swap.token_address = Some("primary".to_string());
+        order.source_swap.initiator = sol_initiator.clone();
+        order.source_swap.redeemer = sol_redeemer.clone();
+
+        order.destination_swap.chain = "tars_1".to_string();
+        order.destination_swap.asset = "primary".to_string();
+        order.destination_swap.htlc_address = Some("primary".to_string());
+        order.destination_swap.token_address = Some("primary".to_string());
+
+        order.create_order.source_chain = "solana_devnet".to_string();
+        order.create_order.destination_chain = "tars_1".to_string();
+        order.create_order.source_asset = "primary".to_string();
+        order.create_order.destination_asset = "primary".to_string();
+        order.create_order.initiator_source_address = sol_initiator.clone();
+
+        provider.create_matched_order(&order).await.unwrap();
+
+        let matched_order = provider
+            .get_matched_order(&order.create_order.create_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(matched_order.source_swap.initiator, sol_initiator);
+        assert_eq!(matched_order.source_swap.redeemer, sol_redeemer);
+        assert_eq!(
+            matched_order.create_order.initiator_source_address,
+            order.create_order.initiator_source_address
         );
 
         delete_matched_order(&provider.pool, &matched_order.create_order.create_id)

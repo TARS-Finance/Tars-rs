@@ -121,14 +121,14 @@ pub struct TestTxData {
 /// Creates and returns a connection to the orderbook database.
 ///
 /// This function establishes a PostgreSQL database connection pool
-/// that can be used for interacting with the Garden orderbook system.
+/// that can be used for interacting with the Unipay orderbook system.
 ///
 /// # Returns
 /// An `OrderbookProvider` instance configured with a PostgreSQL connection pool
 pub async fn provider() -> OrderbookProvider {
     let pool = PgPoolOptions::new()
         .max_connections(10)
-        .connect("postgres://postgres:postgres@localhost:5433/garden")
+        .connect("postgres://postgres:postgres@localhost:5433/unipay")
         .await
         .unwrap();
     OrderbookProvider::new(pool)

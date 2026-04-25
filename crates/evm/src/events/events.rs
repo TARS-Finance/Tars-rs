@@ -110,16 +110,16 @@ pub mod prelude {
 ///
 /// # Example
 /// ```ignore
-/// use garden::evm::{count_types, event_provider, events::prelude};
+/// use unipay::evm::{count_types, event_provider, events::prelude};
 /// pub use prelude::*;
 /// event_provider!(
-/// garden_htlc,
-/// (htlc_v1, GardenHTLCEvents),
-/// (htlc_v2, GardenHTLCv2Events),
-/// (htlc_v3, GardenHTLCv3Events)
+/// unipay_htlc,
+/// (htlc_v1, UnipayHTLCEvents),
+/// (htlc_v2, UnipayHTLCv2Events),
+/// (htlc_v3, UnipayHTLCv3Events)
 /// );
-/// let provider = garden_htlc::EventProvider::new(alloy_provider, None, None).unwrap();
-/// let filter = garden_htlc::AddressFilter::new()
+/// let provider = unipay_htlc::EventProvider::new(alloy_provider, None, None).unwrap();
+/// let filter = unipay_htlc::AddressFilter::new()
 /// .htlc_v1(vec![htlcv1_addr1,htlcv1_addr2])
 /// .htlc_v2(vec![htlcv2_addr1,htlcv2_addr2])
 /// .htlc_v3(vec![htlcv3_addr1,htlcv3_addr2]);
@@ -179,7 +179,7 @@ macro_rules! event_provider {
                 }
             }
 
-            /// Batched event provider for querying Garden HTLC contract events in parallel.
+            /// Batched event provider for querying Unipay HTLC contract events in parallel.
             pub struct EventProvider{
                 provider: Arc<dyn Provider>,
                 max_block_span: u64,
@@ -311,18 +311,18 @@ mod tests {
 
     use super::prelude::*;
     use crate::{
-        events::primitives::EventExt, GardenHTLC::GardenHTLCEvents,
-        GardenHTLCv2::GardenHTLCv2Events, GardenHTLCv3::GardenHTLCv3Events,
+        events::primitives::EventExt, UnipayHTLC::UnipayHTLCEvents,
+        UnipayHTLCv2::UnipayHTLCv2Events, UnipayHTLCv3::UnipayHTLCv3Events,
     };
     use alloy::providers::{Provider, ProviderBuilder};
     use std::sync::Arc;
 
-    // Generate event provider for Garden HTLC contracts (V1, V2, V3)
+    // Generate event provider for Unipay HTLC contracts (V1, V2, V3)
     event_provider!(
-        garden_htlc,
-        (htlc_v1, GardenHTLCEvents),
-        (htlc_v2, GardenHTLCv2Events),
-        (htlc_v3, GardenHTLCv3Events)
+        unipay_htlc,
+        (htlc_v1, UnipayHTLCEvents),
+        (htlc_v2, UnipayHTLCv2Events),
+        (htlc_v3, UnipayHTLCv3Events)
     );
 
     const ARB_SEPOLIA_URL: &str = "https://arbitrum-sepolia.drpc.org";
@@ -334,9 +334,9 @@ mod tests {
     }
 
     /// Sets up an event provider for testing.
-    async fn setup_event_provider() -> garden_htlc::EventProvider {
+    async fn setup_event_provider() -> unipay_htlc::EventProvider {
         let provider = Arc::new(get_provider());
-        garden_htlc::EventProvider::new(Arc::new(provider), Some(9000), None)
+        unipay_htlc::EventProvider::new(Arc::new(provider), Some(9000), None)
     }
 
     /// Fetches events for the specified block range.
@@ -344,12 +344,12 @@ mod tests {
         from_block: u64,
         to_block: u64,
     ) -> (
-        Vec<EventExt<GardenHTLCEvents>>,
-        Vec<EventExt<GardenHTLCv2Events>>,
-        Vec<EventExt<GardenHTLCv3Events>>,
+        Vec<EventExt<UnipayHTLCEvents>>,
+        Vec<EventExt<UnipayHTLCv2Events>>,
+        Vec<EventExt<UnipayHTLCv3Events>>,
     ) {
         let event_provider = setup_event_provider().await;
-        let filter = garden_htlc::AddressFilter::new()
+        let filter = unipay_htlc::AddressFilter::new()
             .htlc_v1(vec![])
             .htlc_v2(vec![])
             .htlc_v3(vec![V3_HTLC_ADDR.parse().unwrap()]);
@@ -368,11 +368,11 @@ mod tests {
         let (_, _, events) = fetch_events(181213666, 181806279).await;
         let init_count = events
             .iter()
-            .filter(|e| matches!(e.event, GardenHTLCv3Events::Initiated(_)))
+            .filter(|e| matches!(e.event, UnipayHTLCv3Events::Initiated(_)))
             .count();
         let redeemed_count = events
             .iter()
-            .filter(|e| matches!(e.event, GardenHTLCv3Events::Redeemed(_)))
+            .filter(|e| matches!(e.event, UnipayHTLCv3Events::Redeemed(_)))
             .count();
         assert_eq!(init_count, 14);
         assert_eq!(redeemed_count, 11);
@@ -386,7 +386,7 @@ mod tests {
         let (_, _, events) = fetch_events(178777490, 181806279).await;
         let init_count = events
             .iter()
-            .filter(|e| matches!(e.event, GardenHTLCv3Events::Initiated(_)))
+            .filter(|e| matches!(e.event, UnipayHTLCv3Events::Initiated(_)))
             .count();
         assert!(init_count >= 27);
     }
@@ -410,13 +410,13 @@ mod tests {
 
     /// Asserts properties of an `Initiated` event.
     fn assert_initiated_event(
-        event: &GardenHTLCv3Events,
+        event: &UnipayHTLCv3Events,
         order_id: &str,
         secret_hash: &str,
         amount: &str,
     ) {
         match event {
-            GardenHTLCv3Events::Initiated(event) => {
+            UnipayHTLCv3Events::Initiated(event) => {
                 assert_eq!(event.orderID.to_string(), order_id);
                 assert_eq!(event.secretHash.to_string(), secret_hash);
                 assert_eq!(event.amount.to_string(), amount);
@@ -427,13 +427,13 @@ mod tests {
 
     /// Asserts properties of a `Redeemed` event.
     fn assert_redeemed_event(
-        event: &GardenHTLCv3Events,
+        event: &UnipayHTLCv3Events,
         order_id: &str,
         secret: &str,
         secret_hash: &str,
     ) {
         match event {
-            GardenHTLCv3Events::Redeemed(event) => {
+            UnipayHTLCv3Events::Redeemed(event) => {
                 assert_eq!(event.orderID.to_string(), order_id);
                 assert_eq!(event.secret.to_string(), secret);
                 assert_eq!(event.secretHash.to_string(), secret_hash);
@@ -474,11 +474,11 @@ mod tests {
         let (_, _, events) = fetch_events(181805278, 181806279).await;
         let init_count = events
             .iter()
-            .filter(|e| matches!(e.event, GardenHTLCv3Events::Initiated(_)))
+            .filter(|e| matches!(e.event, UnipayHTLCv3Events::Initiated(_)))
             .count();
         let redeemed_count = events
             .iter()
-            .filter(|e| matches!(e.event, GardenHTLCv3Events::Redeemed(_)))
+            .filter(|e| matches!(e.event, UnipayHTLCv3Events::Redeemed(_)))
             .count();
         assert_eq!(init_count, 4);
         assert_eq!(redeemed_count, 1);
