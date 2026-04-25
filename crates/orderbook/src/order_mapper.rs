@@ -381,19 +381,27 @@ impl OrderMapper {
         }
 
         let source_swap = &order.source_swap;
+        let is_source_bitcoin = source_swap.chain.contains("bitcoin");
 
-        // Source swap must have valid initiate tx hash and block number
-        if !self.has_valid_initiate(source_swap) {
-            return Ok(false);
+        // Source swap must have an initiate tx. For non-bitcoin sources we also
+        // require a valid block number and the configured confirmation count;
+        // bitcoin sources can trigger destination initiate as soon as the
+        // initiate tx is observed (0-conf), so we skip those checks.
+        if is_source_bitcoin {
+            if !source_swap.initiate_tx_hash.is_some() {
+                return Ok(false);
+            }
+        } else {
+            if !self.has_valid_initiate(source_swap) {
+                return Ok(false);
+            }
+            if source_swap.current_confirmations < source_swap.required_confirmations {
+                return Ok(false);
+            }
         }
 
         // Destination swap must not have initiate tx hash
         if order.destination_swap.initiate_tx_hash.is_some() {
-            return Ok(false);
-        }
-
-        // Source swap must have required confirmations
-        if source_swap.current_confirmations < source_swap.required_confirmations {
             return Ok(false);
         }
 

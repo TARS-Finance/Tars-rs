@@ -33,6 +33,32 @@ pub enum ChainType {
     Sui
 }
 
+impl ChainType {
+    /// Returns true if addresses on this chain are case-sensitive.
+    ///
+    /// Bitcoin (bech32/base58) and Solana (base58) addresses must preserve case;
+    /// EVM/Starknet/Sui addresses are normalized to lowercase.
+    pub fn is_address_case_sensitive(&self) -> bool {
+        matches!(self, ChainType::Bitcoin | ChainType::Solana)
+    }
+}
+
+/// Returns true if the given chain identifier maps to a chain whose addresses
+/// are case-sensitive (Bitcoin or Solana).
+pub fn is_address_case_sensitive(chain: &str) -> bool {
+    ChainType::from(chain).is_address_case_sensitive()
+}
+
+/// Normalize an address string for the given chain: lowercases for chains with
+/// case-insensitive addresses (EVM and friends), preserves case for Bitcoin/Solana.
+pub fn normalize_address(addr: &str, chain: &str) -> String {
+    if is_address_case_sensitive(chain) {
+        addr.to_string()
+    } else {
+        addr.to_lowercase()
+    }
+}
+
 impl From<&str> for ChainType {
     /// Converts a string identifier to a `ChainType` variant
     ///
